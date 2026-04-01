@@ -4,8 +4,22 @@ export type QuestionType = "MCQ" | "SCQ" | "True/False" | "Descriptive";
 export type AssessmentStatus = "Draft" | "Scheduled" | "Active" | "Closed" | "Published";
 export type SubmissionStatus = "Not Started" | "In Progress" | "Submitted" | "Graded";
 
+export interface AssessmentResultsVisibility {
+  showFinalScore: boolean;
+  showScoreBreakdown: boolean;
+  showTeacherFeedback: boolean;
+  showAiKeywordAnalysis: boolean;
+  showPerQuestionDetails: boolean;
+  // Backward compatibility keys used in existing pages.
+  showScore?: boolean;
+  showQuestionBreakdown?: boolean;
+  showKeywordAnalysis?: boolean;
+}
+
 export interface User {
   id: string;
+  firstName?: string;
+  lastName?: string;
   email: string;
   name: string;
   role: UserRole;
@@ -76,11 +90,7 @@ export interface Assessment {
   shuffleAnswers?: boolean;
   autoSubmitOnTimeout?: boolean;
   tabSwitchWarning?: boolean;
-  resultsVisibility?: {
-    showScore: boolean;
-    showQuestionBreakdown: boolean;
-    showKeywordAnalysis: boolean;
-  };
+  resultsVisibility?: AssessmentResultsVisibility;
   createdBy: string;
   createdAt: string;
 }
