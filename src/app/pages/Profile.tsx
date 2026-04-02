@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Card,
   CardContent,
@@ -9,8 +9,11 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Badge } from "../components/ui/badge";
-import { getCurrentUser, teacherAssignments, modules } from "../mockData";
+import { Skeleton } from "../components/ui/skeleton";
+import { useMinimumSkeletonTime } from "../hooks/useMinimumSkeletonTime";
+import { getCurrentUser } from "../mockData";
 import { toast } from "sonner";
+import { apiGet } from "../apiClient";
 
 const namePrefixes = new Set([
   "dr.",
@@ -46,27 +49,66 @@ function getUserNames(fullName: string) {
 }
 
 export default function Profile() {
-  const user = getCurrentUser();
+  const currentUser = getCurrentUser();
+  const [user, setUser] = useState(currentUser);
+  const [apiAssignments, setApiAssignments] = useState<
+    Array<{
+      id: string;
+      moduleCode: string;
+      moduleName: string;
+      teachingRole: string;
+    }>
+  >([]);
+  const [loading, setLoading] = useState(currentUser.role === "teacher");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const showLoadingSkeleton = useMinimumSkeletonTime(loading);
+
+  useEffect(() => {
+    if (currentUser.role !== "teacher") {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setLoadError(null);
+
+    apiGet<{
+      user: {
+        id: string;
+        firstName?: string;
+        lastName?: string;
+        name: string;
+        email: string;
+        role: "admin" | "teacher" | "student";
+        status: "active" | "inactive";
+        createdAt: string;
+      };
+      teacherAssignments: Array<{
+        id: string;
+        moduleCode: string;
+        moduleName: string;
+        teachingRole: string;
+      }>;
+    }>("teacher/profile", { user_id: currentUser.id })
+      .then((data) => {
+        setUser(data.user);
+        setApiAssignments(data.teacherAssignments);
+      })
+      .catch(() => {
+        setLoadError("Could not load profile from backend.");
+        toast.error("Could not load profile from backend.");
+      })
+      .finally(() => setLoading(false));
+  }, [currentUser.id, currentUser.role]);
+
   const parsedNames = getUserNames(user.name);
   const firstName = user.firstName ?? parsedNames.firstName;
   const lastName = user.lastName ?? parsedNames.lastName;
 
-  const teacherModuleAssignments =
-    user.role === "teacher"
-      ? teacherAssignments
-          .filter((assignment) => assignment.teacherId === user.id)
-          .map((assignment) => {
-            const module = modules.find(
-              (item) => item.id === assignment.moduleId,
-            );
-            return {
-              id: assignment.id,
-              moduleCode: module?.code ?? "N/A",
-              moduleName: module?.name ?? "Unknown Module",
-              teachingRole: assignment.teachingRole,
-            };
-          })
-      : [];
+  const teacherModuleAssignments = useMemo(
+    () => apiAssignments,
+    [apiAssignments],
+  );
   const accountAgeDays = Math.max(
     1,
     Math.floor(
@@ -79,6 +121,51 @@ export default function Profile() {
     // TODO: Integrate with backend change-password endpoint
     toast.success("Password change request submitted (demo only).");
   };
+
+  if (showLoadingSkeleton) {
+    return (
+      <div className="p-3 sm:p-6 lg:p-8 max-w-4xl mx-auto">
+        <div className="mb-8 space-y-3">
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-9 w-52" />
+          <Skeleton className="h-5 w-80" />
+        </div>
+
+        <div className="space-y-6">
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center gap-4">
+                <Skeleton className="h-14 w-14 rounded-full" />
+                <div className="space-y-2">
+                  <Skeleton className="h-5 w-44" />
+                  <Skeleton className="h-4 w-56" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Skeleton className="h-60 w-full" />
+          <Skeleton className="h-56 w-full" />
+          <Skeleton className="h-72 w-full" />
+        </div>
+      </div>
+    );
+  }
+
+  if (currentUser.role === "teacher" && loadError) {
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <Card>
+          <CardContent className="py-10 text-center">
+            <p className="text-gray-700 font-medium">
+              Profile data not available.
+            </p>
+            <p className="text-sm text-gray-500 mt-1">{loadError}</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="p-3 sm:p-6 lg:p-8 max-w-4xl mx-auto">

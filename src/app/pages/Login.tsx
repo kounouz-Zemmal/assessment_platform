@@ -1,57 +1,73 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Button } from "../components/ui/button";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { GraduationCap } from "lucide-react";
-import { users, setCurrentUser } from "../mockData";
+import { setCurrentUser } from "../mockData";
 import { toast } from "sonner";
+import { apiGet } from "../apiClient";
+
+const DEMO_TEACHER_EMAIL = "teacher.analytics@demo.edu";
+const DEMO_STUDENT_EMAIL = "student.aya@demo.edu";
 
 export default function Login() {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(DEMO_TEACHER_EMAIL);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
 
-    // Simulate API call
-    setTimeout(() => {
-      const user = users.find((u) => u.email === email);
+    if (email !== DEMO_TEACHER_EMAIL && email !== DEMO_STUDENT_EMAIL) {
+      setError("Use one of the demo accounts shown below.");
+      setLoading(false);
+      return;
+    }
 
-      if (!user) {
-        setError("Invalid email or password");
-        setLoading(false);
-        return;
-      }
+    try {
+      const data = await apiGet<{
+        user: {
+          id: string;
+          firstName?: string;
+          lastName?: string;
+          email: string;
+          name: string;
+          role: "admin" | "teacher" | "student";
+          status: "active" | "inactive";
+          createdAt: string;
+        };
+      }>("auth/demo-user", { email });
 
-      if (user.status === "inactive") {
-        setError("Your account has been deactivated. Please contact the administrator.");
-        setLoading(false);
-        return;
-      }
-
-      // Set current user
+      const user = data.user;
       setCurrentUser(user);
-      
-      // Show success message
       toast.success(`Welcome back, ${user.name}!`);
 
-      // Redirect based on role
-      if (user.role === "admin") {
-        navigate("/admin");
-      } else if (user.role === "teacher") {
+      if (user.role === "teacher") {
         navigate("/teacher");
       } else if (user.role === "student") {
         navigate("/student");
+      } else {
+        navigate("/");
       }
-    }, 800);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Login failed";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -63,13 +79,30 @@ export default function Login() {
               <GraduationCap className="h-10 w-10 text-white" />
             </div>
           </div>
-          <CardTitle className="text-2xl">University Assessment Platform</CardTitle>
-          <CardDescription>
-            Sign in to access your account
-          </CardDescription>
+          <CardTitle className="text-2xl">
+            University Assessment Platform
+          </CardTitle>
+          <CardDescription>Sign in to access your account</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Button
+                type="button"
+                variant={email === DEMO_TEACHER_EMAIL ? "default" : "outline"}
+                onClick={() => setEmail(DEMO_TEACHER_EMAIL)}
+              >
+                Use Teacher Demo
+              </Button>
+              <Button
+                type="button"
+                variant={email === DEMO_STUDENT_EMAIL ? "default" : "outline"}
+                onClick={() => setEmail(DEMO_STUDENT_EMAIL)}
+              >
+                Use Student Demo
+              </Button>
+            </div>
+
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -107,7 +140,11 @@ export default function Login() {
               <button
                 type="button"
                 className="text-sm text-blue-600 hover:underline"
-                onClick={() => toast.info("Please contact your administrator to reset your password.")}
+                onClick={() =>
+                  toast.info(
+                    "Please contact your administrator to reset your password.",
+                  )
+                }
               >
                 Forgot password?
               </button>
@@ -115,11 +152,12 @@ export default function Login() {
           </form>
 
           <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-            <p className="text-xs font-semibold text-gray-700 mb-2">Demo Accounts:</p>
+            <p className="text-xs font-semibold text-gray-700 mb-2">
+              Demo Accounts:
+            </p>
             <div className="space-y-1 text-xs text-gray-600">
-              <p>Admin: admin@university.edu</p>
-              <p>Teacher: john.doe@university.edu</p>
-              <p>Student: alice.johnson@student.edu</p>
+              <p>Teacher: {DEMO_TEACHER_EMAIL}</p>
+              <p>Student: {DEMO_STUDENT_EMAIL}</p>
               <p className="text-gray-500 mt-2 italic">Use any password</p>
             </div>
           </div>

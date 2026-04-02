@@ -26,12 +26,29 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
-import {
-  assessments,
-  submissions,
-  modules,
-  getCurrentUser,
-} from "../../mockData";
+import { getCurrentUser } from "../../mockData";
+import { apiGet } from "../../apiClient";
+import { Skeleton } from "../../components/ui/skeleton";
+import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
+
+type StudentHistoryApiResponse = {
+  rows: Array<{
+    submissionId: string;
+    assessmentId: string;
+    assessmentTitle: string;
+    moduleCode: string;
+    moduleName: string;
+    submittedAt: string | null;
+    status: string;
+    score: number | null;
+    maxScore: number;
+  }>;
+  stats: {
+    totalAttempts: number;
+    gradedAttempts: number;
+    averageScore: number;
+  };
+};
 
 export default function StudentHistory() {
   const navigate = useNavigate();
@@ -41,78 +58,107 @@ export default function StudentHistory() {
   const [selectedSubmissionId, setSelectedSubmissionId] = useState<
     string | null
   >(null);
+  const [historyData, setHistoryData] =
+    useState<StudentHistoryApiResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
-  const mySubmissions = submissions.filter(
-    (s) => s.studentId === currentUser.id,
-  );
+  useEffect(() => {
+    if (currentUser.role !== "student") {
+      setLoading(false);
+      return;
+    }
 
-  // History should display past attempts only.
-  const pastAttempts = mySubmissions.filter(
-    (submission) =>
-      submission.status === "Submitted" || submission.status === "Graded",
-  );
-
-  const rows = pastAttempts
-    .map((submission) => {
-      const assessment = assessments.find(
-        (a) => a.id === submission.assessmentId,
-      );
-      if (!assessment) return null;
-      const module = modules.find((m) => m.id === assessment.moduleId);
-      return { submission, assessment, module };
+    setLoading(true);
+    setLoadError(null);
+    apiGet<StudentHistoryApiResponse>("student/history", {
+      student_id: currentUser.id,
     })
-    .filter(Boolean) as {
-    submission: (typeof submissions)[number];
-    assessment: (typeof assessments)[number];
-    module: (typeof modules)[number] | undefined;
-  }[];
+      .then((data) => setHistoryData(data))
+      .catch(() => {
+        setHistoryData(null);
+        setLoadError("Could not load exam history.");
+      })
+      .finally(() => setLoading(false));
+  }, [currentUser.id, currentUser.role]);
+
+  const rows = historyData?.rows ?? [];
 
   const filteredRows = useMemo(() => {
-    return rows.filter(({ submission, assessment, module }) => {
+    return rows.filter((row) => {
       const matchesSearch =
-        assessment.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        module?.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        module?.name.toLowerCase().includes(searchQuery.toLowerCase());
+        row.assessmentTitle.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        row.moduleCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        row.moduleName.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesStatus =
-        statusFilter === "all" || submission.status === statusFilter;
+        statusFilter === "all" || row.status === statusFilter;
 
-      return Boolean(matchesSearch) && matchesStatus;
+      return matchesSearch && matchesStatus;
     });
   }, [rows, searchQuery, statusFilter]);
 
   const selectedRow = filteredRows.find(
-    ({ submission }) => submission.id === selectedSubmissionId,
+    (row) => row.submissionId === selectedSubmissionId,
   );
 
-  const gradedRows = rows.filter(
-    ({ submission }) => submission.status === "Graded",
-  );
-  const averageScore =
-    gradedRows.length === 0
-      ? 0
-      : gradedRows.reduce(
-          (sum, row) =>
-            sum +
-            (((row.submission.score ?? 0) / row.submission.maxScore) * 100 ||
-              0),
-          0,
-        ) / gradedRows.length;
+  const gradedRows = rows.filter((row) => row.status === "Graded");
+  const averageScore = historyData?.stats.averageScore ?? 0;
 
   useEffect(() => {
     if (!selectedSubmissionId && filteredRows.length > 0) {
-      setSelectedSubmissionId(filteredRows[0].submission.id);
+      setSelectedSubmissionId(filteredRows[0].submissionId);
       return;
     }
 
     if (
       selectedSubmissionId &&
-      !filteredRows.some(
-        ({ submission }) => submission.id === selectedSubmissionId,
-      )
+      !filteredRows.some((row) => row.submissionId === selectedSubmissionId)
     ) {
-      setSelectedSubmissionId(filteredRows[0]?.submission.id ?? null);
+      setSelectedSubmissionId(filteredRows[0]?.submissionId ?? null);
     }
   }, [filteredRows, selectedSubmissionId]);
+
+  if (showLoadingSkeleton) {
+    return (
+      <div className="p-3 sm:p-6 lg:p-8 max-w-7xl mx-auto">
+        <div className="mb-8 space-y-3">
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-9 w-56" />
+          <Skeleton className="h-5 w-80" />
+        </div>
+        <Card className="mb-6">
+          <CardContent className="pt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </CardContent>
+        </Card>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+          <Skeleton className="h-20 w-full" />
+          <Skeleton className="h-20 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
+
+  if (!historyData) {
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <Card>
+          <CardContent className="py-10 text-center">
+            <p className="text-gray-700 font-medium">
+              History data not available.
+            </p>
+            {loadError && (
+              <p className="text-sm text-gray-500 mt-1">{loadError}</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="p-3 sm:p-6 lg:p-8 max-w-7xl mx-auto">
@@ -226,40 +272,40 @@ export default function StudentHistory() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredRows.map(({ submission, assessment, module }) => (
+                    {filteredRows.map((row) => (
                       <TableRow
-                        key={submission.id}
-                        className={`cursor-pointer transition-colors duration-200 ease-out hover:bg-gray-50 focus-within:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset ${selectedSubmissionId === submission.id ? "bg-blue-50" : ""}`}
-                        onClick={() => setSelectedSubmissionId(submission.id)}
+                        key={row.submissionId}
+                        className={`cursor-pointer transition-colors duration-200 ease-out hover:bg-gray-50 focus-within:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset ${selectedSubmissionId === row.submissionId ? "bg-blue-50" : ""}`}
+                        onClick={() =>
+                          setSelectedSubmissionId(row.submissionId)
+                        }
                         tabIndex={0}
                         role="button"
                         onKeyDown={(event) => {
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
-                            setSelectedSubmissionId(submission.id);
+                            setSelectedSubmissionId(row.submissionId);
                           }
                         }}
                       >
                         <TableCell className="font-medium min-w-[180px]">
-                          {assessment.title}
+                          {row.assessmentTitle}
                         </TableCell>
                         <TableCell>
-                          {module && (
-                            <Badge variant="outline">{module.code}</Badge>
-                          )}
+                          <Badge variant="outline">{row.moduleCode}</Badge>
                         </TableCell>
                         <TableCell className="min-w-[160px]">
-                          {submission.submittedAt
-                            ? new Date(submission.submittedAt).toLocaleString()
-                            : "—"}
+                          {row.submittedAt
+                            ? new Date(row.submittedAt).toLocaleString()
+                            : "-"}
                         </TableCell>
                         <TableCell>
-                          <StatusBadge status={submission.status} />
+                          <StatusBadge status={row.status as never} />
                         </TableCell>
                         <TableCell className="text-right">
-                          {submission.score !== undefined ? (
+                          {row.score !== null ? (
                             <span className="font-semibold">
-                              {submission.score}/{submission.maxScore}
+                              {row.score}/{row.maxScore}
                             </span>
                           ) : (
                             <span className="text-sm text-gray-500">
@@ -274,7 +320,7 @@ export default function StudentHistory() {
                             onClick={(event) => {
                               event.stopPropagation();
                               navigate(
-                                `/student/assessments/${assessment.id}/results`,
+                                `/student/assessments/${row.assessmentId}/results`,
                               );
                             }}
                           >
@@ -305,7 +351,7 @@ export default function StudentHistory() {
                       Assessment
                     </p>
                     <p className="text-sm text-gray-900">
-                      {selectedRow.assessment.title}
+                      {selectedRow.assessmentTitle}
                     </p>
                   </div>
                   <div>
@@ -313,7 +359,7 @@ export default function StudentHistory() {
                       Module
                     </p>
                     <p className="text-sm text-gray-900">
-                      {selectedRow.module?.code} - {selectedRow.module?.name}
+                      {selectedRow.moduleCode} - {selectedRow.moduleName}
                     </p>
                   </div>
                   <div>
@@ -321,11 +367,9 @@ export default function StudentHistory() {
                       Attempt Date
                     </p>
                     <p className="text-sm text-gray-900">
-                      {selectedRow.submission.submittedAt
-                        ? new Date(
-                            selectedRow.submission.submittedAt,
-                          ).toLocaleString()
-                        : "—"}
+                      {selectedRow.submittedAt
+                        ? new Date(selectedRow.submittedAt).toLocaleString()
+                        : "-"}
                     </p>
                   </div>
                   <div>
@@ -333,14 +377,14 @@ export default function StudentHistory() {
                       Status
                     </p>
                     <div className="mt-1">
-                      <StatusBadge status={selectedRow.submission.status} />
+                      <StatusBadge status={selectedRow.status as never} />
                     </div>
                   </div>
                   <div>
                     <p className="text-xs font-semibold text-gray-500">Score</p>
                     <p className="text-sm text-gray-900">
-                      {selectedRow.submission.score !== undefined
-                        ? `${selectedRow.submission.score}/${selectedRow.submission.maxScore}`
+                      {selectedRow.score !== null
+                        ? `${selectedRow.score}/${selectedRow.maxScore}`
                         : "Pending"}
                     </p>
                   </div>
@@ -349,7 +393,7 @@ export default function StudentHistory() {
                     className="w-full mt-2"
                     onClick={() =>
                       navigate(
-                        `/student/assessments/${selectedRow.assessment.id}/results`,
+                        `/student/assessments/${selectedRow.assessmentId}/results`,
                       )
                     }
                   >
