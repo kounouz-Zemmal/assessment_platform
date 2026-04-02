@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { ArrowLeft, CheckCircle, XCircle } from "lucide-react";
 import { Button } from "../../components/ui/button";
@@ -10,80 +11,187 @@ import {
 import { Badge } from "../../components/ui/badge";
 import { Alert, AlertDescription } from "../../components/ui/alert";
 import { Progress } from "../../components/ui/progress";
-import { assessments, submissions, questions, modules } from "../../mockData";
+import { Skeleton } from "../../components/ui/skeleton";
+import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
 import { getCurrentUser } from "../../mockData";
+import { apiGet } from "../../apiClient";
+
+type StudentResultsApiResponse = {
+  assessment: {
+    id: string;
+    title: string;
+    moduleCode: string;
+    moduleName: string;
+  };
+  visibility: {
+    showFinalScore: boolean;
+    showScoreBreakdown: boolean;
+    showTeacherFeedback: boolean;
+    showAiKeywordAnalysis: boolean;
+    showPerQuestionDetails: boolean;
+    showScore?: boolean;
+    showQuestionBreakdown?: boolean;
+    showKeywordAnalysis?: boolean;
+  };
+  submission: {
+    id: string;
+    status: string;
+    score: number | null;
+    maxScore: number;
+    submittedAt: string | null;
+    feedback: string | null;
+    answers: Array<{
+      questionId: string;
+      questionText: string;
+      questionType: string;
+      points: number;
+      answer: string;
+      correctAnswer: string | null;
+      autoScore: number;
+      detectedKeywords: string[];
+      missingKeywords: string[];
+      teacherComment: string | null;
+    }>;
+  };
+};
 
 export default function StudentResults() {
   const { id } = useParams();
   const navigate = useNavigate();
   const currentUser = getCurrentUser();
-
-  const assessment = assessments.find((a) => a.id === id);
-  const submission = submissions.find(
-    (s) => s.assessmentId === id && s.studentId === currentUser.id,
+  const [apiData, setApiData] = useState<StudentResultsApiResponse | null>(
+    null,
   );
-  const module = assessment
-    ? modules.find((m) => m.id === assessment.moduleId)
-    : null;
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
-  if (!assessment || !submission) {
-    return <div className="p-4 sm:p-6 lg:p-8">Results not found</div>;
+  useEffect(() => {
+    if (!id || currentUser.role !== "student") {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setLoadError(null);
+    apiGet<StudentResultsApiResponse>(`student/results/${id}`, {
+      student_id: currentUser.id,
+    })
+      .then((data) => setApiData(data))
+      .catch(() => {
+        setApiData(null);
+        setLoadError("Could not load results from backend.");
+      })
+      .finally(() => setLoading(false));
+  }, [id, currentUser.id, currentUser.role]);
+
+  if (showLoadingSkeleton) {
+    return (
+      <div className="p-3 sm:p-6 lg:p-8 max-w-5xl mx-auto">
+        <div className="mb-6">
+          <Skeleton className="h-9 w-48" />
+        </div>
+        <div className="mb-8 space-y-3">
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-9 w-72" />
+          <Skeleton className="h-5 w-56" />
+          <div className="flex flex-wrap gap-2">
+            <Skeleton className="h-7 w-32" />
+            <Skeleton className="h-7 w-32" />
+            <Skeleton className="h-7 w-32" />
+          </div>
+        </div>
+        <div className="max-w-4xl space-y-4 sm:space-y-6">
+          <Card>
+            <CardContent className="pt-6 space-y-3">
+              <Skeleton className="h-6 w-80" />
+              <Skeleton className="h-2 w-full" />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-6">
+              <Skeleton className="h-32 w-full" />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-6 space-y-3">
+              <Skeleton className="h-5 w-40" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
   }
 
-  const isPublished = submission.status === "Graded";
-  const visibility = assessment.resultsVisibility ?? {
-    showFinalScore: true,
-    showScoreBreakdown: true,
-    showTeacherFeedback: true,
-    showAiKeywordAnalysis: true,
-    showPerQuestionDetails: true,
-    showScore: true,
-    showQuestionBreakdown: true,
-    showKeywordAnalysis: true,
+  if (!apiData) {
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <Card>
+          <CardContent className="py-10 text-center">
+            <p className="text-gray-700 font-medium">Results not found.</p>
+            {loadError && (
+              <p className="text-sm text-gray-500 mt-1">{loadError}</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const uiAssessment = {
+    id: apiData.assessment.id,
+    title: apiData.assessment.title,
+    moduleCode: apiData.assessment.moduleCode,
+    moduleName: apiData.assessment.moduleName,
   };
+
+  const uiVisibility = apiData.visibility;
+
+  const uiSubmission = {
+    status: apiData.submission.status,
+    score: apiData.submission.score,
+    maxScore: apiData.submission.maxScore,
+    submittedAt: apiData.submission.submittedAt,
+    feedback: apiData.submission.feedback,
+    answers: apiData.submission.answers,
+  };
+
+  const isPublished = uiSubmission.status === "Graded";
   const showFinalScore =
-    visibility.showFinalScore ?? visibility.showScore ?? true;
+    uiVisibility.showFinalScore ?? uiVisibility.showScore ?? true;
   const showScoreBreakdown =
-    visibility.showScoreBreakdown ?? visibility.showQuestionBreakdown ?? true;
-  const showTeacherFeedback = visibility.showTeacherFeedback ?? true;
+    uiVisibility.showScoreBreakdown ??
+    uiVisibility.showQuestionBreakdown ??
+    true;
+  const showTeacherFeedback = uiVisibility.showTeacherFeedback ?? true;
   const showAiKeywordAnalysis =
-    visibility.showAiKeywordAnalysis ?? visibility.showKeywordAnalysis ?? true;
+    uiVisibility.showAiKeywordAnalysis ??
+    uiVisibility.showKeywordAnalysis ??
+    true;
   const showPerQuestionDetails =
-    visibility.showPerQuestionDetails ?? showScoreBreakdown;
-  const hasNumericScore = typeof submission.score === "number";
+    uiVisibility.showPerQuestionDetails ?? showScoreBreakdown;
+
+  const hasNumericScore = typeof uiSubmission.score === "number";
   const shouldShowScoreCard = isPublished && showFinalScore && hasNumericScore;
   const shouldShowNotPublishedAlert = !isPublished;
   const shouldShowScoreHiddenAlert = isPublished && !showFinalScore;
-  const answeredCount = submission.answers.filter((answer) =>
+
+  const answeredCount = uiSubmission.answers.filter((answer) =>
     String(answer.answer ?? "").trim(),
   ).length;
   const completionPercentage =
-    submission.answers.length === 0
+    uiSubmission.answers.length === 0
       ? 0
-      : Math.round((answeredCount / submission.answers.length) * 100);
+      : Math.round((answeredCount / uiSubmission.answers.length) * 100);
 
-  const questionBreakdown = submission.answers
-    .map((answer, index) => {
-      const question = questions.find((item) => item.id === answer.questionId);
-      if (!question) return null;
-
-      const score =
-        typeof answer.autoScore === "number"
-          ? Math.max(0, Math.min(answer.autoScore, question.points))
-          : question.type === "Descriptive"
-            ? 0
-            : answer.answer === question.correctAnswer
-              ? question.points
-              : 0;
-
-      return {
-        id: question.id,
-        label: `Question ${index + 1}`,
-        score,
-        maxScore: question.points,
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const questionBreakdown = uiSubmission.answers.map((answer, index) => ({
+    id: answer.questionId,
+    label: `Question ${index + 1}`,
+    score: answer.autoScore,
+    maxScore: answer.points,
+  }));
 
   return (
     <div className="p-3 sm:p-6 lg:p-8 max-w-5xl mx-auto">
@@ -101,10 +209,10 @@ export default function StudentResults() {
           Attempt Insights
         </Badge>
         <h1 className="text-xl sm:text-3xl font-bold text-gray-900 break-words">
-          {assessment.title}
+          {uiAssessment.title}
         </h1>
         <p className="text-gray-500 mt-1">
-          {module?.code} - {module?.name}
+          {uiAssessment.moduleCode} - {uiAssessment.moduleName}
         </p>
         <div className="mt-3 flex flex-wrap gap-1.5 sm:gap-2">
           <Badge variant={showFinalScore ? "default" : "secondary"}>
@@ -119,6 +227,9 @@ export default function StudentResults() {
           <Badge variant={showAiKeywordAnalysis ? "default" : "secondary"}>
             AI Analysis {showAiKeywordAnalysis ? "Visible" : "Hidden"}
           </Badge>
+          <Badge variant={showPerQuestionDetails ? "default" : "secondary"}>
+            Per-question Details {showPerQuestionDetails ? "Visible" : "Hidden"}
+          </Badge>
         </div>
       </div>
 
@@ -126,9 +237,9 @@ export default function StudentResults() {
         <Card className="border-dashed border-gray-300 bg-gray-50/40">
           <CardContent className="pt-6 space-y-3">
             <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">Status: {submission.status}</Badge>
+              <Badge variant="outline">Status: {uiSubmission.status}</Badge>
               <Badge variant="outline">
-                Answered: {answeredCount}/{submission.answers.length}
+                Answered: {answeredCount}/{uiSubmission.answers.length}
               </Badge>
               <Badge variant="outline">
                 Completion: {completionPercentage}%
@@ -138,7 +249,6 @@ export default function StudentResults() {
           </CardContent>
         </Card>
 
-        {/* Score Card */}
         {shouldShowScoreCard && (
           <Card className="border-2 border-green-200 bg-green-50 shadow-sm">
             <CardContent className="pt-6">
@@ -151,19 +261,21 @@ export default function StudentResults() {
                     <p className="text-sm text-gray-600">Your Score</p>
                     <p className="text-3xl sm:text-4xl font-bold text-gray-900">
                       {Math.round(
-                        ((submission.score as number) / submission.maxScore) *
+                        ((uiSubmission.score as number) /
+                          uiSubmission.maxScore) *
                           100,
                       )}
                       %
                     </p>
                     <p className="text-sm text-gray-600 mt-1">
-                      {submission.score as number} out of {submission.maxScore}{" "}
-                      points
+                      {uiSubmission.score as number} out of{" "}
+                      {uiSubmission.maxScore} points
                     </p>
                     <div className="mt-3">
                       <Progress
                         value={Math.round(
-                          ((submission.score as number) / submission.maxScore) *
+                          ((uiSubmission.score as number) /
+                            uiSubmission.maxScore) *
                             100,
                         )}
                         className="h-2"
@@ -174,10 +286,14 @@ export default function StudentResults() {
                 <div className="text-left lg:text-right">
                   <p className="text-sm text-gray-600">Submitted</p>
                   <p className="font-medium">
-                    {new Date(submission.submittedAt!).toLocaleDateString()}
+                    {uiSubmission.submittedAt
+                      ? new Date(uiSubmission.submittedAt).toLocaleDateString()
+                      : "-"}
                   </p>
                   <p className="text-sm text-gray-500">
-                    {new Date(submission.submittedAt!).toLocaleTimeString()}
+                    {uiSubmission.submittedAt
+                      ? new Date(uiSubmission.submittedAt).toLocaleTimeString()
+                      : "-"}
                   </p>
                 </div>
               </div>
@@ -211,19 +327,17 @@ export default function StudentResults() {
           </Alert>
         )}
 
-        {/* Teacher Feedback */}
-        {isPublished && showTeacherFeedback && submission.feedback && (
+        {isPublished && showTeacherFeedback && uiSubmission.feedback && (
           <Card className="shadow-sm border-gray-200">
             <CardHeader>
               <CardTitle>Teacher Feedback</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-gray-700">{submission.feedback}</p>
+              <p className="text-gray-700">{uiSubmission.feedback}</p>
             </CardContent>
           </Card>
         )}
 
-        {/* Score Breakdown */}
         {isPublished && showScoreBreakdown && (
           <Card className="shadow-sm border-gray-200">
             <CardHeader>
@@ -253,7 +367,6 @@ export default function StudentResults() {
           </Card>
         )}
 
-        {/* Question Review */}
         {isPublished && showPerQuestionDetails && (
           <Card className="shadow-sm border-gray-200">
             <CardHeader>
@@ -261,125 +374,108 @@ export default function StudentResults() {
             </CardHeader>
             <CardContent>
               <div className="space-y-6">
-                {submission.answers.map((answer, index) => {
-                  const question = questions.find(
-                    (q) => q.id === answer.questionId,
-                  );
-                  if (!question) return null;
+                {uiSubmission.answers.map((answer, index) => (
+                  <div
+                    key={answer.questionId}
+                    className="pb-6 border-b last:border-b-0"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">Question {index + 1}</Badge>
+                        <Badge variant="outline">{answer.questionType}</Badge>
+                      </div>
+                      <span className="text-sm text-gray-500">
+                        {answer.points} points
+                      </span>
+                    </div>
 
-                  const isCorrect =
-                    question.type === "MCQ" ||
-                    question.type === "SCQ" ||
-                    question.type === "True/False"
-                      ? answer.answer === question.correctAnswer
-                      : undefined;
+                    <p className="text-gray-900 mb-3">{answer.questionText}</p>
 
-                  return (
-                    <div
-                      key={question.id}
-                      className="pb-6 border-b last:border-b-0"
-                    >
-                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="outline">Question {index + 1}</Badge>
-                          <Badge variant="outline">{question.type}</Badge>
-                          {isCorrect !== undefined && (
-                            <Badge
-                              variant={isCorrect ? "default" : "destructive"}
-                              className={isCorrect ? "bg-green-500" : ""}
-                            >
-                              {isCorrect ? "Correct" : "Incorrect"}
-                            </Badge>
+                    <div className="space-y-2">
+                      <div>
+                        <p className="text-sm font-medium text-gray-600">
+                          Your Answer:
+                        </p>
+                        <p className="text-gray-900">
+                          {answer.answer || (
+                            <span className="text-gray-400">
+                              No answer provided
+                            </span>
                           )}
-                        </div>
-                        <span className="text-sm text-gray-500">
-                          {question.points} points
-                        </span>
+                        </p>
                       </div>
 
-                      <p className="text-gray-900 mb-3">{question.text}</p>
-
-                      <div className="space-y-2">
+                      {answer.correctAnswer && (
                         <div>
                           <p className="text-sm font-medium text-gray-600">
-                            Your Answer:
+                            Correct Answer:
                           </p>
-                          <p className="text-gray-900">
-                            {answer.answer || (
-                              <span className="text-gray-400">
-                                No answer provided
-                              </span>
-                            )}
+                          <p className="text-green-600 font-medium">
+                            {answer.correctAnswer}
                           </p>
                         </div>
+                      )}
 
-                        {question.type !== "Descriptive" && (
-                          <div>
-                            <p className="text-sm font-medium text-gray-600">
-                              Correct Answer:
+                      {answer.questionType === "DESCRIPTIVE" &&
+                        showAiKeywordAnalysis && (
+                          <div className="mt-3 p-3 bg-blue-50 rounded-lg">
+                            <p className="text-sm font-semibold text-blue-900 mb-2">
+                              Keyword Analysis
                             </p>
-                            <p className="text-green-600 font-medium">
-                              {String(question.correctAnswer)}
-                            </p>
+                            <div className="space-y-2">
+                              {answer.detectedKeywords.length > 0 && (
+                                <div>
+                                  <p className="text-xs text-gray-600">
+                                    Detected Keywords:
+                                  </p>
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    {answer.detectedKeywords.map(
+                                      (keyword, idx) => (
+                                        <Badge
+                                          key={idx}
+                                          variant="default"
+                                          className="bg-green-500 text-xs"
+                                        >
+                                          {keyword}
+                                        </Badge>
+                                      ),
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                              {answer.missingKeywords.length > 0 && (
+                                <div>
+                                  <p className="text-xs text-gray-600">
+                                    Missing Keywords:
+                                  </p>
+                                  <div className="flex flex-wrap gap-1 mt-1">
+                                    {answer.missingKeywords.map(
+                                      (keyword, idx) => (
+                                        <Badge
+                                          key={idx}
+                                          variant="secondary"
+                                          className="bg-red-100 text-red-700 text-xs"
+                                        >
+                                          {keyword}
+                                        </Badge>
+                                      ),
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                              {answer.detectedKeywords.length === 0 &&
+                                answer.missingKeywords.length === 0 && (
+                                  <p className="text-xs text-gray-600">
+                                    No keyword analysis has been saved yet for
+                                    this answer.
+                                  </p>
+                                )}
+                            </div>
                           </div>
                         )}
-
-                        {question.type === "Descriptive" &&
-                          answer.detectedKeywords &&
-                          showAiKeywordAnalysis && (
-                            <div className="mt-3 p-3 bg-blue-50 rounded-lg">
-                              <p className="text-sm font-semibold text-blue-900 mb-2">
-                                Keyword Analysis
-                              </p>
-                              <div className="space-y-2">
-                                {answer.detectedKeywords.length > 0 && (
-                                  <div>
-                                    <p className="text-xs text-gray-600">
-                                      Detected Keywords:
-                                    </p>
-                                    <div className="flex flex-wrap gap-1 mt-1">
-                                      {answer.detectedKeywords.map(
-                                        (keyword, idx) => (
-                                          <Badge
-                                            key={idx}
-                                            variant="default"
-                                            className="bg-green-500 text-xs"
-                                          >
-                                            {keyword}
-                                          </Badge>
-                                        ),
-                                      )}
-                                    </div>
-                                  </div>
-                                )}
-                                {answer.missingKeywords &&
-                                  answer.missingKeywords.length > 0 && (
-                                    <div>
-                                      <p className="text-xs text-gray-600">
-                                        Missing Keywords:
-                                      </p>
-                                      <div className="flex flex-wrap gap-1 mt-1">
-                                        {answer.missingKeywords.map(
-                                          (keyword, idx) => (
-                                            <Badge
-                                              key={idx}
-                                              variant="secondary"
-                                              className="bg-red-100 text-red-700 text-xs"
-                                            >
-                                              {keyword}
-                                            </Badge>
-                                          ),
-                                        )}
-                                      </div>
-                                    </div>
-                                  )}
-                              </div>
-                            </div>
-                          )}
-                      </div>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
             </CardContent>
           </Card>

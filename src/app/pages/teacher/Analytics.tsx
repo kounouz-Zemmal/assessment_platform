@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   BarChart,
@@ -18,6 +18,8 @@ import {
   CardHeader,
   CardTitle,
 } from "../../components/ui/card";
+import { Skeleton } from "../../components/ui/skeleton";
+import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
 import { StatCard } from "../../components/StatCard";
 import {
   Select,
@@ -28,21 +30,14 @@ import {
 } from "../../components/ui/select";
 import { Button } from "../../components/ui/button";
 import { Badge } from "../../components/ui/badge";
-import {
-  assessments,
-  submissions,
-  questions,
-  modules,
-  teacherAssignments,
-  getCurrentUser,
-} from "../../mockData";
-import { Submission, Question } from "../../types";
+import { getCurrentUser } from "../../mockData";
 import {
   BarChart3,
   CheckCircle2,
   ClipboardCheck,
   AlertTriangle,
 } from "lucide-react";
+import { apiGet } from "../../apiClient";
 
 const PASSING_PERCENTAGE = 50;
 
@@ -57,75 +52,80 @@ type QuestionDifficultyMetric = {
   difficulty: "Easy" | "Medium" | "Hard";
 };
 
-function normalizeToArray(value: string | string[] | undefined): string[] {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
-}
-
-function getAnswerScore(submission: Submission, question: Question): number {
-  const answer = submission.answers.find(
-    (item) => item.questionId === question.id,
-  );
-  if (!answer) return 0;
-
-  if (typeof answer.autoScore === "number") {
-    return Math.max(0, Math.min(answer.autoScore, question.points));
-  }
-
-  const expectedAnswers = normalizeToArray(question.correctAnswer).map((item) =>
-    item.trim().toLowerCase(),
-  );
-  const studentAnswers = normalizeToArray(answer.answer).map((item) =>
-    item.trim().toLowerCase(),
-  );
-
-  if (expectedAnswers.length === 0) {
-    return 0;
-  }
-
-  const allMatch =
-    studentAnswers.length === expectedAnswers.length &&
-    expectedAnswers.every((expected) => studentAnswers.includes(expected));
-
-  return allMatch ? question.points : 0;
-}
-
-function getDifficultyFromSuccessRate(
-  successRate: number,
-): "Easy" | "Medium" | "Hard" {
-  if (successRate >= 70) return "Easy";
-  if (successRate >= 40) return "Medium";
-  return "Hard";
-}
-
 export default function TeacherAnalytics() {
   const navigate = useNavigate();
   const currentUser = getCurrentUser();
+  const [analyticsData, setAnalyticsData] = useState<null | {
+    authorizedAssessments: Array<{
+      id: string;
+      title: string;
+      moduleId: string;
+      moduleCode: string;
+      status: string;
+    }>;
+    selectedAssessmentId: string | null;
+    summary: {
+      totalSubmissions: number;
+      passedStudents: number;
+      failedStudents: number;
+      averageScore: number;
+      passRate: number;
+    };
+    scoreDistribution: Array<{ range: string; count: number }>;
+    questionMetrics: QuestionDifficultyMetric[];
+    difficultyBreakdown: Array<{ name: string; value: number; color: string }>;
+    selectedAssessment?: {
+      id: string;
+      title: string;
+      moduleCode: string;
+      moduleName: string;
+      status: string;
+      duration: number;
+      startTime: string | null;
+      endTime: string | null;
+    };
+  }>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
-  const authorizedAssessments = useMemo(() => {
-    const assignedModuleIds = new Set(
-      teacherAssignments
-        .filter((assignment) => assignment.teacherId === currentUser.id)
-        .map((assignment) => assignment.moduleId),
-    );
-
-    return assessments.filter(
-      (assessment) =>
-        assessment.createdBy === currentUser.id ||
-        assignedModuleIds.has(assessment.moduleId),
-    );
-  }, [currentUser.id]);
+  const authorizedAssessments = analyticsData?.authorizedAssessments ?? [];
 
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(
     authorizedAssessments[0]?.id ?? "",
   );
 
-  const selectedAssessment = authorizedAssessments.find(
-    (assessment) => assessment.id === selectedAssessmentId,
-  );
-  const selectedModule = modules.find(
-    (module) => module.id === selectedAssessment?.moduleId,
-  );
+  useEffect(() => {
+    if (currentUser.role !== "teacher") {
+      setLoading(false);
+      return;
+    }
+
+    const params: Record<string, string> = { teacher_id: currentUser.id };
+    if (selectedAssessmentId) {
+      params.assessment_id = selectedAssessmentId;
+    }
+
+    setLoading(true);
+    setLoadError(null);
+    apiGet<NonNullable<typeof analyticsData>>("teacher/analytics", params)
+      .then((data) => {
+        setAnalyticsData(data);
+        if (
+          data.selectedAssessmentId &&
+          data.selectedAssessmentId !== selectedAssessmentId
+        ) {
+          setSelectedAssessmentId(data.selectedAssessmentId);
+        }
+      })
+      .catch(() => {
+        setAnalyticsData(null);
+        setLoadError("Could not load analytics from backend.");
+      })
+      .finally(() => setLoading(false));
+  }, [currentUser.id, currentUser.role, selectedAssessmentId]);
+
+  const selectedAssessment = analyticsData?.selectedAssessment;
 
   if (currentUser.role !== "teacher") {
     return (
@@ -138,6 +138,66 @@ export default function TeacherAnalytics() {
             <p className="text-gray-500 text-sm mt-1">
               Your account does not have access to this section.
             </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (showLoadingSkeleton) {
+    return (
+      <div className="p-3 sm:p-6 lg:p-8 max-w-7xl mx-auto">
+        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="space-y-3">
+            <Skeleton className="h-5 w-28" />
+            <Skeleton className="h-9 w-72" />
+            <Skeleton className="h-5 w-96" />
+          </div>
+          <div className="w-full lg:w-[360px] space-y-2">
+            <Skeleton className="h-4 w-36" />
+            <Skeleton className="h-10 w-full" />
+          </div>
+        </div>
+
+        <Card className="mb-6">
+          <CardContent className="pt-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6 mb-6">
+          <Skeleton className="h-28 w-full" />
+          <Skeleton className="h-28 w-full" />
+          <Skeleton className="h-28 w-full" />
+          <Skeleton className="h-28 w-full" />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <Skeleton className="h-80 w-full" />
+          <Skeleton className="h-80 w-full" />
+        </div>
+
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
+
+  if (!analyticsData) {
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <Card>
+          <CardContent className="py-10 text-center">
+            <p className="text-gray-700 font-medium">
+              Analytics data not available.
+            </p>
+            {loadError && (
+              <p className="text-sm text-gray-500 mt-1">{loadError}</p>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -180,120 +240,16 @@ export default function TeacherAnalytics() {
     return null;
   }
 
-  const selectedAssessmentSubmissions = submissions.filter(
-    (submission) => submission.assessmentId === selectedAssessment.id,
-  );
+  const totalSubmissions = analyticsData.summary.totalSubmissions;
+  const passedStudents = analyticsData.summary.passedStudents;
+  const failedStudents = analyticsData.summary.failedStudents;
+  const averageScore = analyticsData.summary.averageScore;
+  const passRate = analyticsData.summary.passRate;
 
-  const finalizedSubmissions = selectedAssessmentSubmissions.filter(
-    (submission) =>
-      submission.status === "Graded" || submission.status === "Submitted",
-  );
-
-  const scoredSubmissions = finalizedSubmissions.map((submission) => {
-    const calculatedScore =
-      typeof submission.score === "number"
-        ? submission.score
-        : submission.answers.reduce((sum, answer) => {
-            const question = questions.find(
-              (item) => item.id === answer.questionId,
-            );
-            return sum + (question ? getAnswerScore(submission, question) : 0);
-          }, 0);
-
-    const maxScore = submission.maxScore || 1;
-    const percentage = (calculatedScore / maxScore) * 100;
-
-    return {
-      submission,
-      score: calculatedScore,
-      maxScore,
-      percentage,
-      passed: percentage >= PASSING_PERCENTAGE,
-    };
-  });
-
-  const totalSubmissions = finalizedSubmissions.length;
-  const passedStudents = scoredSubmissions.filter((item) => item.passed).length;
-  const failedStudents = Math.max(0, totalSubmissions - passedStudents);
-  const averageScore =
-    scoredSubmissions.length === 0
-      ? 0
-      : scoredSubmissions.reduce((sum, item) => sum + item.percentage, 0) /
-        scoredSubmissions.length;
-  const passRate =
-    totalSubmissions === 0 ? 0 : (passedStudents / totalSubmissions) * 100;
-
-  const scoreDistribution = [
-    { range: "0-20", min: 0, max: 20 },
-    { range: "21-40", min: 21, max: 40 },
-    { range: "41-60", min: 41, max: 60 },
-    { range: "61-80", min: 61, max: 80 },
-    { range: "81-100", min: 81, max: 100 },
-  ].map((bucket) => ({
-    range: bucket.range,
-    count: scoredSubmissions.filter(
-      (item) => item.percentage >= bucket.min && item.percentage <= bucket.max,
-    ).length,
-  }));
-
-  const selectedQuestions = questions.filter((question) =>
-    selectedAssessment.questions.includes(question.id),
-  );
-
-  const questionMetrics: QuestionDifficultyMetric[] = selectedQuestions.map(
-    (question) => {
-      const submissionsWithAnswer = finalizedSubmissions.filter((submission) =>
-        submission.answers.some((answer) => answer.questionId === question.id),
-      );
-
-      const attemptCount = submissionsWithAnswer.length;
-
-      const scores = submissionsWithAnswer.map((submission) =>
-        getAnswerScore(submission, question),
-      );
-      const correctCount = scores.filter(
-        (score) => score >= question.points * 0.6,
-      ).length;
-      const averageQuestionScore =
-        attemptCount === 0
-          ? 0
-          : scores.reduce((sum, score) => sum + score, 0) / attemptCount;
-      const successRate =
-        attemptCount === 0 ? 0 : (correctCount / attemptCount) * 100;
-
-      return {
-        questionId: question.id,
-        label: `Q${selectedAssessment.questions.indexOf(question.id) + 1}`,
-        attemptCount,
-        averageScore: averageQuestionScore,
-        successRate,
-        correctCount,
-        maxPoints: question.points,
-        difficulty: getDifficultyFromSuccessRate(successRate),
-      };
-    },
-  );
-
-  const difficultyBreakdown = [
-    {
-      name: "Easy",
-      value: questionMetrics.filter((metric) => metric.difficulty === "Easy")
-        .length,
-      color: "#10b981",
-    },
-    {
-      name: "Medium",
-      value: questionMetrics.filter((metric) => metric.difficulty === "Medium")
-        .length,
-      color: "#f59e0b",
-    },
-    {
-      name: "Hard",
-      value: questionMetrics.filter((metric) => metric.difficulty === "Hard")
-        .length,
-      color: "#ef4444",
-    },
-  ];
+  const scoreDistribution = analyticsData.scoreDistribution;
+  const questionMetrics: QuestionDifficultyMetric[] =
+    analyticsData.questionMetrics;
+  const difficultyBreakdown = analyticsData.difficultyBreakdown;
 
   const getDifficultyBadgeClass = (difficulty: "Easy" | "Medium" | "Hard") => {
     if (difficulty === "Easy") return "bg-green-100 text-green-700";
@@ -326,16 +282,11 @@ export default function TeacherAnalytics() {
               <SelectValue placeholder="Choose assessment" />
             </SelectTrigger>
             <SelectContent>
-              {authorizedAssessments.map((assessment) => {
-                const module = modules.find(
-                  (item) => item.id === assessment.moduleId,
-                );
-                return (
-                  <SelectItem key={assessment.id} value={assessment.id}>
-                    {assessment.title} {module ? `(${module.code})` : ""}
-                  </SelectItem>
-                );
-              })}
+              {authorizedAssessments.map((assessment) => (
+                <SelectItem key={assessment.id} value={assessment.id}>
+                  {assessment.title} ({assessment.moduleCode})
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -349,7 +300,7 @@ export default function TeacherAnalytics() {
                 Assessment
               </p>
               <p className="font-medium text-gray-900 mt-1">
-                {selectedAssessment.title}
+                {selectedAssessment?.title ?? "-"}
               </p>
             </div>
             <div>
@@ -357,8 +308,8 @@ export default function TeacherAnalytics() {
                 Module
               </p>
               <p className="font-medium text-gray-900 mt-1">
-                {selectedModule
-                  ? `${selectedModule.code} - ${selectedModule.name}`
+                {selectedAssessment
+                  ? `${selectedAssessment.moduleCode} - ${selectedAssessment.moduleName}`
                   : "Unknown module"}
               </p>
             </div>
@@ -367,7 +318,7 @@ export default function TeacherAnalytics() {
                 Status
               </p>
               <p className="font-medium text-gray-900 mt-1">
-                {selectedAssessment.status}
+                {selectedAssessment?.status ?? "-"}
               </p>
             </div>
             <div className="flex flex-wrap gap-2 md:justify-end">
@@ -524,9 +475,6 @@ export default function TeacherAnalytics() {
           ) : (
             <div className="space-y-3">
               {questionMetrics.map((metric) => {
-                const question = questions.find(
-                  (item) => item.id === metric.questionId,
-                );
                 return (
                   <div
                     key={metric.questionId}
@@ -539,14 +487,10 @@ export default function TeacherAnalytics() {
                       >
                         {metric.difficulty}
                       </Badge>
-                      <p className="text-sm text-gray-600">{question?.type}</p>
                       {metric.attemptCount === 0 && (
                         <Badge variant="secondary">No attempts yet</Badge>
                       )}
                     </div>
-                    <p className="text-sm text-gray-900 mb-3 line-clamp-2">
-                      {question?.text}
-                    </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                       <div className="bg-white rounded-md p-3 border border-gray-200">
                         <p className="text-gray-500">Attempts</p>
