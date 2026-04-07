@@ -1,5 +1,5 @@
 export type UserRole = "admin" | "teacher" | "student";
-export type TeachingRole = "Lecturer" | "Lab Instructor" | "Tutorial Instructor";
+export type TeachingRole = "LECTURER" | "LAB_TEACHER" | "TD_TEACHER" | "ASSISTANT";
 export type QuestionType = "MCQ" | "SCQ" | "True/False" | "Descriptive";
 export type AssessmentStatus = "Draft" | "Scheduled" | "Active" | "Closed" | "Published";
 export type SubmissionStatus = "Not Started" | "In Progress" | "Submitted" | "Graded";
@@ -17,7 +17,7 @@ export interface AssessmentResultsVisibility {
 }
 
 export interface User {
-  id: string;
+  id: string | number;
   firstName?: string;
   lastName?: string;
   email: string;
@@ -28,31 +28,33 @@ export interface User {
 }
 
 export interface Module {
-  id: string;
+  id: string | number;
   code: string;
   name: string;
-  description: string;
+  description?: string;
   topics: Topic[];
 }
 
 export interface Topic {
-  id: string;
+  id: string | number;
   name: string;
-  moduleId: string;
+  moduleId: string | number;
 }
 
 export interface TeacherAssignment {
-  id: string;
-  teacherId: string;
-  moduleId: string;
+  id: string | number;
+  teacherId: string | number;
+  moduleId: string | number;
   teachingRole: TeachingRole;
 }
 
 export interface StudentEnrollment {
-  id: string;
-  studentId: string;
-  moduleId: string;
+  id: string | number;
+  studentId: string | number;
+  moduleId: string | number;
   group?: string;
+  studentName?: string;
+  studentEmail?: string;
 }
 
 export interface Keyword {

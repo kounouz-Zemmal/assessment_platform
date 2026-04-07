@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Plus, Trash2, Search, Upload } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -7,15 +7,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "../../components/ui/dialog";
 import { Label } from "../../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
-import { users, modules, studentEnrollments } from "../../mockData";
+import { apiGet, apiPost, apiDelete } from "../../apiClient";
 import { StudentEnrollment } from "../../types";
 import { toast } from "sonner";
 import { Badge } from "../../components/ui/badge";
 
 export default function AdminEnrollment() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [enrollments, setEnrollments] = useState(studentEnrollments);
+  const [enrollments, setEnrollments] = useState<StudentEnrollment[]>([]);
+  const [modules, setModules] = useState<any[]>([]);
+  const [students, setStudents] = useState<any[]>([]);
   const [isEnrollDialogOpen, setIsEnrollDialogOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const [formData, setFormData] = useState({
     studentId: "",
@@ -23,50 +26,98 @@ export default function AdminEnrollment() {
     group: "",
   });
 
-  const students = users.filter((u) => u.role === "student");
-
   const filteredEnrollments = enrollments.filter((enrollment) => {
-    const student = users.find((u) => u.id === enrollment.studentId);
+    const student = students.find((u) => u.id === enrollment.studentId);
     const module = modules.find((m) => m.id === enrollment.moduleId);
     const searchLower = searchQuery.toLowerCase();
     
     return (
-      student?.name.toLowerCase().includes(searchLower) ||
-      module?.code.toLowerCase().includes(searchLower) ||
-      module?.name.toLowerCase().includes(searchLower)
+      student?.name?.toLowerCase().includes(searchLower) ||
+      module?.code?.toLowerCase().includes(searchLower) ||
+      module?.name?.toLowerCase().includes(searchLower) ||
+      enrollment.group?.toLowerCase().includes(searchLower)
     );
   });
 
-  const handleEnrollStudent = () => {
+  const loadEnrollments = async () => {
+    setLoading(true);
+    try {
+      // Load modules
+      const modulesResponse = await apiGet<{ modules: any[] }>("admin/modules");
+      if (!modulesResponse || !modulesResponse.modules) {
+        throw new Error("Could not load modules");
+      }
+      setModules(modulesResponse.modules);
+
+      // Load all enrollments for all modules
+      const allEnrollments: StudentEnrollment[] = [];
+      for (const module of modulesResponse.modules) {
+        const enrollmentsResponse = await apiGet<{ enrollments: StudentEnrollment[] }>(`admin/modules/${module.id}/enrollments`);
+        if (enrollmentsResponse && enrollmentsResponse.enrollments) {
+          allEnrollments.push(...enrollmentsResponse.enrollments);
+        }
+      }
+      setEnrollments(allEnrollments);
+
+      // Load students
+      const studentsResponse = await apiGet<{ users: any[] }>("admin/users?role=student&page=1&page_size=1000");
+      if (!studentsResponse || !studentsResponse.users) {
+        throw new Error("Could not load students");
+      }
+      setStudents(studentsResponse.users.map((user: any) => ({
+        ...user,
+        name: user.name || `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || user.email,
+      })));
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to load enrollments";
+      console.error("Error loading enrollments:", error);
+      toast.error(errorMsg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadEnrollments();
+  }, []);
+
+  const handleEnrollStudent = async () => {
     if (!formData.studentId || !formData.moduleId) {
       toast.error("Please select both student and module");
       return;
     }
 
-    // Check if already enrolled
-    const exists = enrollments.find(
-      (e) => e.studentId === formData.studentId && e.moduleId === formData.moduleId
-    );
-    
-    if (exists) {
-      toast.error("Student is already enrolled in this module");
-      return;
-    }
+    try {
+      const response = await apiPost<{ enrollment: StudentEnrollment }>(`admin/modules/${formData.moduleId}/enroll-student`, {
+        studentId: formData.studentId,
+        group: formData.group || "Default",
+      });
 
-    const newEnrollment: StudentEnrollment = {
-      id: `e${Date.now()}`,
-      ...formData,
-    };
-    
-    setEnrollments([...enrollments, newEnrollment]);
-    toast.success("Student enrolled successfully");
-    setIsEnrollDialogOpen(false);
-    resetForm();
+      if (!response || !response.enrollment) {
+        throw new Error("Invalid response from server");
+      }
+
+      setEnrollments([...enrollments, response.enrollment]);
+      toast.success("Student enrolled successfully");
+      setIsEnrollDialogOpen(false);
+      resetForm();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to enroll student";
+      console.error("Error enrolling student:", error);
+      toast.error(errorMsg);
+    }
   };
 
-  const handleRemoveEnrollment = (enrollmentId: string) => {
-    setEnrollments(enrollments.filter((e) => e.id !== enrollmentId));
-    toast.success("Enrollment removed");
+  const handleRemoveEnrollment = async (enrollmentId: string, moduleId: string) => {
+    try {
+      await apiDelete(`admin/modules/${moduleId}/enrollments/${enrollmentId}`);
+      setEnrollments(enrollments.filter((e) => e.id !== enrollmentId));
+      toast.success("Enrollment removed");
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to remove enrollment";
+      console.error("Error removing enrollment:", error);
+      toast.error(errorMsg);
+    }
   };
 
   const handleImportStudents = () => {
@@ -122,7 +173,7 @@ export default function AdminEnrollment() {
                     </SelectTrigger>
                     <SelectContent>
                       {students.map((student) => (
-                        <SelectItem key={student.id} value={student.id}>
+                        <SelectItem key={student.id} value={String(student.id)}>
                           {student.name}
                         </SelectItem>
                       ))}
@@ -138,7 +189,7 @@ export default function AdminEnrollment() {
                     </SelectTrigger>
                     <SelectContent>
                       {modules.map((module) => (
-                        <SelectItem key={module.id} value={module.id}>
+                        <SelectItem key={module.id} value={String(module.id)}>
                           {module.code} - {module.name}
                         </SelectItem>
                       ))}
@@ -214,7 +265,7 @@ export default function AdminEnrollment() {
                   </TableHeader>
                   <TableBody>
                     {moduleEnrollments.map((enrollment) => {
-                      const student = users.find((u) => u.id === enrollment.studentId);
+                      const student = students.find((u) => u.id === enrollment.studentId);
                       return (
                         <TableRow key={enrollment.id}>
                           <TableCell className="font-medium">{student?.name}</TableCell>
@@ -230,7 +281,7 @@ export default function AdminEnrollment() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => handleRemoveEnrollment(enrollment.id)}
+                              onClick={() => handleRemoveEnrollment(String(enrollment.id), String(module.id))}
                             >
                               <Trash2 className="h-4 w-4 text-red-600" />
                             </Button>
