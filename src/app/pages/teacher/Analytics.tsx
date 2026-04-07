@@ -30,7 +30,7 @@ import {
 } from "../../components/ui/select";
 import { Button } from "../../components/ui/button";
 import { Badge } from "../../components/ui/badge";
-import { getCurrentUser } from "../../mockData";
+import { useAuth } from "../../contexts/AuthContext";
 import {
   BarChart3,
   CheckCircle2,
@@ -54,7 +54,7 @@ type QuestionDifficultyMetric = {
 
 export default function TeacherAnalytics() {
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [analyticsData, setAnalyticsData] = useState<null | {
     authorizedAssessments: Array<{
       id: string;
@@ -96,12 +96,12 @@ export default function TeacherAnalytics() {
   );
 
   useEffect(() => {
-    if (currentUser.role !== "teacher") {
+    if (!user || user.role !== "teacher") {
       setLoading(false);
       return;
     }
 
-    const params: Record<string, string> = { teacher_id: currentUser.id };
+    const params: Record<string, string> = {};
     if (selectedAssessmentId) {
       params.assessment_id = selectedAssessmentId;
     }

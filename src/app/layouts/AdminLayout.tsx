@@ -1,23 +1,27 @@
 import { Outlet, useNavigate, useLocation } from "react-router";
-import { 
-  LayoutDashboard, 
-  Users, 
-  BookOpen, 
-  UserCog, 
+import {
+  LayoutDashboard,
+  Users,
+  BookOpen,
+  UserCog,
   UsersRound,
   User,
-  LogOut 
+  LogOut
 } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { getCurrentUser } from "../mockData";
+import { useAuth } from "../contexts/AuthContext";
 import Unauthorized from "../pages/Unauthorized";
 
 export default function AdminLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const user = getCurrentUser();
+  const { user, logout, loading } = useAuth();
 
-  if (user.role !== "admin") {
+  if (loading) {
+    return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  }
+
+  if (!user || user.role !== "admin") {
     return <Unauthorized />;
   }
 
@@ -30,8 +34,8 @@ export default function AdminLayout() {
     { name: "Profile", href: "/admin/profile", icon: User },
   ];
 
-  const handleLogout = () => {
-    navigate("/");
+  const handleLogout = async () => {
+    await logout();
   };
 
   return (
@@ -42,7 +46,7 @@ export default function AdminLayout() {
           <h1 className="text-xl font-bold text-gray-900">University Assessment</h1>
           <p className="text-sm text-gray-500 mt-1">Admin Portal</p>
         </div>
-        
+
         <nav className="flex-1 p-4 space-y-1">
           {navigation.map((item) => {
             const isActive = location.pathname === item.href;

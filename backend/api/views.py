@@ -1,4 +1,4 @@
-from apps.auth_demo.views import demo_login_user
+from apps.auth_demo.views import login_view, logout_view, current_user
 from apps.student.views import student_dashboard, student_history, student_results
 from apps.teacher.views import (
     teacher_analytics,
@@ -9,7 +9,9 @@ from apps.teacher.views import (
 
 
 __all__ = [
-    "demo_login_user",
+    "login_view",
+    "logout_view",
+    "current_user",
     "teacher_profile",
     "teacher_result_visibility_list",
     "teacher_result_visibility_update",

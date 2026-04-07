@@ -26,7 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
-import { getCurrentUser } from "../../mockData";
+import { useAuth } from "../../contexts/AuthContext";
 import { apiGet } from "../../apiClient";
 import { Skeleton } from "../../components/ui/skeleton";
 import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
@@ -52,7 +52,7 @@ type StudentHistoryApiResponse = {
 
 export default function StudentHistory() {
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedSubmissionId, setSelectedSubmissionId] = useState<
@@ -65,23 +65,21 @@ export default function StudentHistory() {
   const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
   useEffect(() => {
-    if (currentUser.role !== "student") {
+    if (!user || user.role !== "student") {
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setLoadError(null);
-    apiGet<StudentHistoryApiResponse>("student/history", {
-      student_id: currentUser.id,
-    })
+    apiGet<StudentHistoryApiResponse>("student/history")
       .then((data) => setHistoryData(data))
       .catch(() => {
         setHistoryData(null);
         setLoadError("Could not load exam history.");
       })
       .finally(() => setLoading(false));
-  }, [currentUser.id, currentUser.role]);
+  }, [user]);
 
   const rows = historyData?.rows ?? [];
 

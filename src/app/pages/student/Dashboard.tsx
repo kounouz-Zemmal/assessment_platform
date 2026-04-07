@@ -13,7 +13,7 @@ import { Progress } from "../../components/ui/progress";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Skeleton } from "../../components/ui/skeleton";
 import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
-import { getCurrentUser } from "../../mockData";
+import { useAuth } from "../../contexts/AuthContext";
 import { Badge } from "../../components/ui/badge";
 import { apiGet } from "../../apiClient";
 
@@ -53,7 +53,7 @@ type DashboardApiResponse = {
 
 export default function StudentDashboard() {
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [dashboardData, setDashboardData] =
     useState<DashboardApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,23 +61,21 @@ export default function StudentDashboard() {
   const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
   useEffect(() => {
-    if (currentUser.role !== "student") {
+    if (!user || user.role !== "student") {
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setLoadError(null);
-    apiGet<DashboardApiResponse>("student/dashboard", {
-      student_id: currentUser.id,
-    })
+    apiGet<DashboardApiResponse>("student/dashboard")
       .then((data) => setDashboardData(data))
       .catch(() => {
         setDashboardData(null);
         setLoadError("Could not load dashboard data.");
       })
       .finally(() => setLoading(false));
-  }, [currentUser.id, currentUser.role]);
+  }, [user]);
 
   const uiStats = {
     upcoming: dashboardData?.stats.upcomingCount ?? 0,

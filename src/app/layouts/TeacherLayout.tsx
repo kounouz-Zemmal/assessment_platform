@@ -19,16 +19,20 @@ import {
   SheetHeader,
   SheetTitle,
 } from "../components/ui/sheet";
-import { getCurrentUser } from "../mockData";
+import { useAuth } from "../contexts/AuthContext";
 import Unauthorized from "../pages/Unauthorized";
 
 export default function TeacherLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const user = getCurrentUser();
+  const { user, logout, loading } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  if (user.role !== "teacher") {
+  if (loading) {
+    return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  }
+
+  if (!user || user.role !== "teacher") {
     return <Unauthorized />;
   }
 
@@ -46,8 +50,9 @@ export default function TeacherLayout() {
     { name: "Profile", href: "/teacher/profile", icon: GraduationCap },
   ];
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setMobileMenuOpen(false);
+    await logout();
     navigate("/");
   };
 

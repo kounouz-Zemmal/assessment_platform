@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus, Pencil, Trash2, Search, BookOpen } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -7,17 +7,26 @@ import { Card, CardContent, CardHeader } from "../../components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "../../components/ui/dialog";
 import { Label } from "../../components/ui/label";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "../../components/ui/alert-dialog";
-import { modules } from "../../mockData";
 import { Module, Topic } from "../../types";
+import { apiGet, apiPost, apiPatch, apiDelete } from "../../apiClient";
 import { toast } from "sonner";
 import { Badge } from "../../components/ui/badge";
 
+type ModulesResponse = {
+  modules: Array<{ id: string | number; code: string; name: string; description?: string }>;
+};
+
+type ModuleResponse = {
+  module: { id: string | number; code: string; name: string; description?: string };
+};
+
 export default function AdminModules() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [moduleList, setModuleList] = useState(modules);
+  const [moduleList, setModuleList] = useState<Module[]>([]);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [editingModule, setEditingModule] = useState<Module | null>(null);
   const [newTopicName, setNewTopicName] = useState("");
+  const [loading, setLoading] = useState(false);
 
   const [formData, setFormData] = useState({
     code: "",
@@ -32,33 +41,89 @@ export default function AdminModules() {
       module.code.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleCreateModule = () => {
-    const newModule: Module = {
-      id: `m${Date.now()}`,
-      ...formData,
-    };
-    setModuleList([...moduleList, newModule]);
-    toast.success("Module created successfully");
-    setIsCreateDialogOpen(false);
-    resetForm();
+  const loadModules = async () => {
+    setLoading(true);
+    try {
+      const response = await apiGet<ModulesResponse>("admin/modules");
+      if (!response || !response.modules) {
+        throw new Error("Invalid response from server");
+      }
+      setModuleList(response.modules.map((module) => ({ ...module, topics: [] })));
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to load modules";
+      console.error("Error loading modules:", error);
+      toast.error(errorMsg);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleUpdateModule = () => {
+  useEffect(() => {
+    loadModules();
+  }, []);
+
+  const handleCreateModule = async () => {
+    if (!formData.code || !formData.name) {
+      toast.error("Code and name are required");
+      return;
+    }
+    try {
+      const response = await apiPost<ModuleResponse>("admin/modules", {
+        ...formData,
+      });
+      if (!response || !response.module) {
+        throw new Error("Invalid response from server");
+      }
+      setModuleList([...moduleList, { ...response.module, topics: [] }]);
+      toast.success("Module created successfully");
+      setIsCreateDialogOpen(false);
+      resetForm();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to create module";
+      console.error("Error creating module:", error);
+      toast.error(errorMsg);
+    }
+  };
+
+  const handleUpdateModule = async () => {
     if (!editingModule) return;
-    
-    setModuleList(
-      moduleList.map((module) =>
-        module.id === editingModule.id ? { ...module, ...formData } : module
-      )
-    );
-    toast.success("Module updated successfully");
-    setEditingModule(null);
-    resetForm();
+    if (!formData.code || !formData.name) {
+      toast.error("Code and name are required");
+      return;
+    }
+
+    try {
+      const response = await apiPatch<ModuleResponse>(`admin/modules/${editingModule.id}`, {
+        ...formData,
+      });
+      if (!response || !response.module) {
+        throw new Error("Invalid response from server");
+      }
+      setModuleList(
+        moduleList.map((module) =>
+          module.id === editingModule.id ? { ...response.module, topics: module.topics || [] } : module
+        )
+      );
+      toast.success("Module updated successfully");
+      setEditingModule(null);
+      resetForm();
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to update module";
+      console.error("Error updating module:", error);
+      toast.error(errorMsg);
+    }
   };
 
-  const handleDeleteModule = (moduleId: string) => {
-    setModuleList(moduleList.filter((module) => module.id !== moduleId));
-    toast.success("Module deleted successfully");
+  const handleDeleteModule = async (moduleId: string) => {
+    try {
+      await apiDelete(`admin/modules/${moduleId}/delete`);
+      setModuleList(moduleList.filter((module) => module.id !== moduleId));
+      toast.success("Module deleted successfully");
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to delete module";
+      console.error("Error deleting module:", error);
+      toast.error(errorMsg);
+    }
   };
 
   const handleAddTopic = () => {
@@ -89,7 +154,7 @@ export default function AdminModules() {
     setFormData({
       code: module.code,
       name: module.name,
-      description: module.description,
+      description: module.description || "",
       topics: [...module.topics],
     });
   };
@@ -185,7 +250,7 @@ export default function AdminModules() {
                       {topic.name}
                       <button
                         type="button"
-                        onClick={() => handleRemoveTopic(topic.id)}
+                        onClick={() => handleRemoveTopic(String(topic.id))}
                         className="hover:text-red-600"
                       >
                         ×
@@ -219,77 +284,81 @@ export default function AdminModules() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredModules.map((module) => (
-          <Card key={module.id}>
-            <CardHeader>
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-lg bg-blue-100 flex items-center justify-center">
-                    <BookOpen className="h-5 w-5 text-blue-600" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold text-lg">{module.code}</h3>
-                    <p className="text-sm text-gray-500">{module.name}</p>
+      {loading ? (
+        <div className="text-center text-gray-500">Loading modules...</div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {filteredModules.map((module) => (
+            <Card key={module.id}>
+              <CardHeader>
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-lg bg-blue-100 flex items-center justify-center">
+                      <BookOpen className="h-5 w-5 text-blue-600" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-lg">{module.code}</h3>
+                      <p className="text-sm text-gray-500">{module.name}</p>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-gray-600 mb-4">{module.description}</p>
-              
-              <div className="mb-4">
-                <p className="text-xs font-semibold text-gray-500 mb-2">Topics ({module.topics.length})</p>
-                <div className="flex flex-wrap gap-1">
-                  {module.topics.slice(0, 3).map((topic) => (
-                    <Badge key={topic.id} variant="outline" className="text-xs">
-                      {topic.name}
-                    </Badge>
-                  ))}
-                  {module.topics.length > 3 && (
-                    <Badge variant="outline" className="text-xs">
-                      +{module.topics.length - 3} more
-                    </Badge>
-                  )}
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-gray-600 mb-4">{module.description}</p>
+                
+                <div className="mb-4">
+                  <p className="text-xs font-semibold text-gray-500 mb-2">Topics ({module.topics.length})</p>
+                  <div className="flex flex-wrap gap-1">
+                    {module.topics.slice(0, 3).map((topic) => (
+                      <Badge key={topic.id} variant="outline" className="text-xs">
+                        {topic.name}
+                      </Badge>
+                    ))}
+                    {module.topics.length > 3 && (
+                      <Badge variant="outline" className="text-xs">
+                        +{module.topics.length - 3} more
+                      </Badge>
+                    )}
+                  </div>
                 </div>
-              </div>
 
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="flex-1"
-                  onClick={() => openEditDialog(module)}
-                >
-                  <Pencil className="h-3 w-3 mr-1" />
-                  Edit
-                </Button>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button variant="outline" size="sm" className="text-red-600 hover:text-red-700">
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Delete Module</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Are you sure you want to delete {module.code}? This will affect all associated assessments.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction onClick={() => handleDeleteModule(module.id)} className="bg-red-600 hover:bg-red-700">
-                        Delete
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1"
+                    onClick={() => openEditDialog(module)}
+                  >
+                    <Pencil className="h-3 w-3 mr-1" />
+                    Edit
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button variant="outline" size="sm" className="text-red-600 hover:text-red-700">
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete Module</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Are you sure you want to delete {module.code}? This will affect all associated assessments.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => handleDeleteModule(String(module.id))} className="bg-red-600 hover:bg-red-700">
+                          Delete
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

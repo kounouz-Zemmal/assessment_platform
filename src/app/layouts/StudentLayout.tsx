@@ -16,16 +16,20 @@ import {
   SheetHeader,
   SheetTitle,
 } from "../components/ui/sheet";
-import { getCurrentUser } from "../mockData";
+import { useAuth } from "../contexts/AuthContext";
 import Unauthorized from "../pages/Unauthorized";
 
 export default function StudentLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const user = getCurrentUser();
+  const { user, logout, loading } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  if (user.role !== "student") {
+  if (loading) {
+    return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  }
+
+  if (!user || user.role !== "student") {
     return <Unauthorized />;
   }
 
@@ -40,9 +44,9 @@ export default function StudentLayout() {
     { name: "Profile", href: "/student/profile", icon: User },
   ];
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setMobileMenuOpen(false);
-    navigate("/");
+    await logout();
   };
 
   const handleNavigate = (href: string) => {

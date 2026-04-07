@@ -11,7 +11,7 @@ import { Label } from "../components/ui/label";
 import { Badge } from "../components/ui/badge";
 import { Skeleton } from "../components/ui/skeleton";
 import { useMinimumSkeletonTime } from "../hooks/useMinimumSkeletonTime";
-import { getCurrentUser } from "../mockData";
+import { useAuth } from "../contexts/AuthContext";
 import { toast } from "sonner";
 import { apiGet } from "../apiClient";
 
@@ -49,7 +49,7 @@ function getUserNames(fullName: string) {
 }
 
 export default function Profile() {
-  const currentUser = getCurrentUser();
+  const { user: currentUser } = useAuth();
   const [user, setUser] = useState(currentUser);
   const [apiAssignments, setApiAssignments] = useState<
     Array<{
@@ -59,11 +59,13 @@ export default function Profile() {
       teachingRole: string;
     }>
   >([]);
-  const [loading, setLoading] = useState(currentUser.role === "teacher");
+  const [loading, setLoading] = useState(currentUser?.role === "teacher");
   const [loadError, setLoadError] = useState<string | null>(null);
   const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
   useEffect(() => {
+    if (!currentUser) return;
+
     if (currentUser.role !== "teacher") {
       setLoading(false);
       return;
@@ -89,7 +91,7 @@ export default function Profile() {
         moduleName: string;
         teachingRole: string;
       }>;
-    }>("teacher/profile", { user_id: currentUser.id })
+    }>("teacher/profile")
       .then((data) => {
         setUser(data.user);
         setApiAssignments(data.teacherAssignments);
