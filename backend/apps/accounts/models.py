@@ -36,7 +36,7 @@ class User(AbstractBaseUser):
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     email = models.CharField(max_length=255, unique=True)
-    password_hash = models.CharField(max_length=255)  # Maps to Django's password field
+    password = models.CharField(max_length=255, db_column='password_hash')
     role = models.ForeignKey(Role, models.DO_NOTHING)
     is_active = models.BooleanField(default=True)
     last_login = models.DateTimeField(blank=True, null=True, db_column='last_login_at')
@@ -57,12 +57,12 @@ class User(AbstractBaseUser):
         return f"{self.first_name} {self.last_name} ({self.email})"
 
     @property
-    def password(self):
-        return self.password_hash
+    def is_staff(self):
+        return self.role.name.upper() == "ADMIN"
 
-    @password.setter
-    def password(self, value):
-        self.password_hash = value
+    @property
+    def is_superuser(self):
+        return self.role.name.upper() == "ADMIN"
 
     def has_perm(self, perm, obj=None):
         return self.role.name.upper() == "ADMIN"
