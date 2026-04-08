@@ -18,11 +18,21 @@ from apps.common.utils import (
     assessment_status,
     attempt_status,
     extract_keyword_analysis,
-    required_int,
     to_float,
     to_percentage,
     visibility_payload,
 )
+
+
+def require_student_auth(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({"detail": "Authentication required"}, status=401)
+
+    role_name = getattr(getattr(request.user, "role", None), "name", "").lower()
+    if role_name != "student":
+        return JsonResponse({"detail": "Forbidden"}, status=403)
+
+    return None
 
 
 def _normalize_question_type(value):
@@ -55,9 +65,11 @@ def _infer_correct_answer(question_type, student_answer, is_correct):
 
 @require_GET
 def student_dashboard(request):
-    student_id, error = required_int(request, "student_id")
-    if error:
-        return error
+    auth_error = require_student_auth(request)
+    if auth_error:
+        return auth_error
+
+    student_id = request.user.id
 
     try:
         student = User.objects.get(id=student_id)
@@ -65,14 +77,23 @@ def student_dashboard(request):
         return JsonResponse({"detail": "Student not found"}, status=404)
 
     enrollment_rows = (
-        StudentGroup.objects.filter(student_id=student_id)
+        StudentGroup.objects.filter(
+            student_id=student_id,
+            group__module__deleted_at__isnull=True,
+            group__module__is_active=True,
+        )
         .select_related("group", "group__module")
         .order_by("group__module__code", "group__name")
     )
     module_ids = [row.group.module_id for row in enrollment_rows]
 
     assessments = list(
-        Assessment.objects.filter(module_id__in=module_ids, deleted_at__isnull=True)
+        Assessment.objects.filter(
+            module_id__in=module_ids,
+            deleted_at__isnull=True,
+            module__deleted_at__isnull=True,
+            module__is_active=True,
+        )
         .select_related("module")
         .order_by("start_time", "id")
     )
@@ -174,9 +195,11 @@ def student_dashboard(request):
 
 @require_GET
 def student_history(request):
-    student_id, error = required_int(request, "student_id")
-    if error:
-        return error
+    auth_error = require_student_auth(request)
+    if auth_error:
+        return auth_error
+
+    student_id = request.user.id
 
     attempts = list(
         Attempt.objects.filter(student_id=student_id)
@@ -232,9 +255,11 @@ def student_history(request):
 
 @require_GET
 def student_results(request, assessment_id):
-    student_id, error = required_int(request, "student_id")
-    if error:
-        return error
+    auth_error = require_student_auth(request)
+    if auth_error:
+        return auth_error
+
+    student_id = request.user.id
 
     try:
         assessment = Assessment.objects.select_related("module").get(id=assessment_id)

@@ -123,11 +123,11 @@ export default function TeacherAnalytics() {
         setLoadError("Could not load analytics from backend.");
       })
       .finally(() => setLoading(false));
-  }, [currentUser.id, currentUser.role, selectedAssessmentId]);
+  }, [user, selectedAssessmentId]);
 
   const selectedAssessment = analyticsData?.selectedAssessment;
 
-  if (currentUser.role !== "teacher") {
+  if (!user || user.role !== "teacher") {
     return (
       <div className="p-4 sm:p-6 lg:p-8">
         <Card>

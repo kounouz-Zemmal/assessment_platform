@@ -13,7 +13,7 @@ import { Skeleton } from "../components/ui/skeleton";
 import { useMinimumSkeletonTime } from "../hooks/useMinimumSkeletonTime";
 import { useAuth } from "../contexts/AuthContext";
 import { toast } from "sonner";
-import { apiGet } from "../apiClient";
+import { apiGet, apiPost } from "../apiClient";
 
 const namePrefixes = new Set([
   "dr.",
@@ -61,12 +61,17 @@ export default function Profile() {
   >([]);
   const [loading, setLoading] = useState(currentUser?.role === "teacher");
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [savingPassword, setSavingPassword] = useState(false);
   const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
   useEffect(() => {
     if (!currentUser) return;
 
     if (currentUser.role !== "teacher") {
+      setUser(currentUser);
       setLoading(false);
       return;
     }
@@ -101,7 +106,21 @@ export default function Profile() {
         toast.error("Could not load profile from backend.");
       })
       .finally(() => setLoading(false));
-  }, [currentUser.id, currentUser.role]);
+  }, [currentUser]);
+
+  if (!currentUser || !user) {
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <Card>
+          <CardContent className="py-10 text-center">
+            <p className="text-gray-700 font-medium">
+              Please sign in to view your profile.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   const parsedNames = getUserNames(user.name);
   const firstName = user.firstName ?? parsedNames.firstName;
@@ -118,10 +137,37 @@ export default function Profile() {
     ),
   );
 
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Integrate with backend change-password endpoint
-    toast.success("Password change request submitted (demo only).");
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      toast.error("Please fill in all password fields.");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      toast.error("New password and confirmation do not match.");
+      return;
+    }
+
+    setSavingPassword(true);
+    try {
+      await apiPost<{ message: string }>("auth/change-password", {
+        currentPassword,
+        newPassword,
+        confirmPassword,
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      toast.success("Password updated successfully.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to update password.";
+      toast.error(message);
+    } finally {
+      setSavingPassword(false);
+    }
   };
 
   if (showLoadingSkeleton) {
@@ -300,6 +346,9 @@ export default function Profile() {
                   id="currentPassword"
                   type="password"
                   placeholder="Enter current password"
+                  value={currentPassword}
+                  onChange={(event) => setCurrentPassword(event.target.value)}
+                  required
                 />
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -309,6 +358,9 @@ export default function Profile() {
                     id="newPassword"
                     type="password"
                     placeholder="Enter new password"
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                    required
                   />
                 </div>
                 <div className="space-y-2">
@@ -317,17 +369,22 @@ export default function Profile() {
                     id="confirmPassword"
                     type="password"
                     placeholder="Re-enter new password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    required
                   />
                 </div>
               </div>
               <p className="text-xs text-gray-500">
-                For demo purposes, this form does not change any real
-                credentials. In a real system, this would call a secure backend
-                API.
+                Your password must meet backend validation rules.
               </p>
               <div className="flex justify-end">
-                <Button type="submit" className="w-full sm:w-auto">
-                  Update Password
+                <Button
+                  type="submit"
+                  className="w-full sm:w-auto"
+                  disabled={savingPassword}
+                >
+                  {savingPassword ? "Updating..." : "Update Password"}
                 </Button>
               </div>
             </form>

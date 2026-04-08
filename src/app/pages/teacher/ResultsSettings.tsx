@@ -9,7 +9,7 @@ import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
 import { Switch } from "../../components/ui/switch";
 import { Label } from "../../components/ui/label";
 import { Badge } from "../../components/ui/badge";
-import { getCurrentUser } from "../../mockData";
+import { useAuth } from "../../contexts/AuthContext";
 import { useMemo, useState } from "react";
 import { useEffect } from "react";
 import { Button } from "../../components/ui/button";
@@ -80,7 +80,7 @@ function withSyncedVisibility(
 }
 
 export default function TeacherResultsSettings() {
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [isBackendLoaded, setIsBackendLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -100,7 +100,7 @@ export default function TeacherResultsSettings() {
   const [statusFilter, setStatusFilter] = useState("all");
 
   useEffect(() => {
-    if (currentUser.role !== "teacher") {
+    if (!user || user.role !== "teacher") {
       setLoading(false);
       return;
     }
@@ -118,7 +118,7 @@ export default function TeacherResultsSettings() {
         status: string;
         resultsVisibility: AssessmentResultsVisibility;
       }>;
-    }>("teacher/result-visibility", { teacher_id: currentUser.id })
+    }>("teacher/result-visibility")
       .then((data) => {
         const mapped = data.assessments.map((item) => ({
           id: item.id,
@@ -132,7 +132,7 @@ export default function TeacherResultsSettings() {
           status: item.status as Assessment["status"],
           questions: [],
           randomize: false,
-          createdBy: currentUser.id,
+          createdBy: user.id,
           createdAt: new Date().toISOString(),
           resultsVisibility: item.resultsVisibility,
         }));
@@ -144,7 +144,7 @@ export default function TeacherResultsSettings() {
         setLoadError("Could not load visibility settings from backend.");
       })
       .finally(() => setLoading(false));
-  }, [currentUser.id, currentUser.role]);
+  }, [user]);
 
   const resetUnsavedChanges = () => {
     if (!isBackendLoaded || dirtyAssessmentIds.length === 0) return;
@@ -159,7 +159,7 @@ export default function TeacherResultsSettings() {
         status: string;
         resultsVisibility: AssessmentResultsVisibility;
       }>;
-    }>("teacher/result-visibility", { teacher_id: currentUser.id })
+    }>("teacher/result-visibility")
       .then((data) => {
         setAssessments((prev) => {
           const byId = new Map(data.assessments.map((item) => [item.id, item]));
@@ -229,7 +229,6 @@ export default function TeacherResultsSettings() {
         showPerQuestionDetails:
           updated.resultsVisibility.showPerQuestionDetails,
       },
-      { teacher_id: currentUser.id },
     )
       .then(() => {
         setDirtyAssessmentIds((prev) =>
@@ -255,21 +254,17 @@ export default function TeacherResultsSettings() {
     );
     Promise.all(
       changedAssessments.map((updated) =>
-        apiPatch(
-          `teacher/result-visibility/${updated.id}`,
-          {
-            showFinalScore: updated.resultsVisibility?.showFinalScore ?? true,
-            showScoreBreakdown:
-              updated.resultsVisibility?.showScoreBreakdown ?? true,
-            showTeacherFeedback:
-              updated.resultsVisibility?.showTeacherFeedback ?? true,
-            showAiKeywordAnalysis:
-              updated.resultsVisibility?.showAiKeywordAnalysis ?? true,
-            showPerQuestionDetails:
-              updated.resultsVisibility?.showPerQuestionDetails ?? true,
-          },
-          { teacher_id: currentUser.id },
-        ),
+        apiPatch(`teacher/result-visibility/${updated.id}`, {
+          showFinalScore: updated.resultsVisibility?.showFinalScore ?? true,
+          showScoreBreakdown:
+            updated.resultsVisibility?.showScoreBreakdown ?? true,
+          showTeacherFeedback:
+            updated.resultsVisibility?.showTeacherFeedback ?? true,
+          showAiKeywordAnalysis:
+            updated.resultsVisibility?.showAiKeywordAnalysis ?? true,
+          showPerQuestionDetails:
+            updated.resultsVisibility?.showPerQuestionDetails ?? true,
+        }),
       ),
     )
       .then(() => {
@@ -322,7 +317,7 @@ export default function TeacherResultsSettings() {
     });
   }, [assessments, searchQuery, moduleFilter, statusFilter]);
 
-  if (currentUser.role !== "teacher") {
+  if (!user || user.role !== "teacher") {
     return (
       <div className="p-4 sm:p-6 lg:p-8">
         <Card>

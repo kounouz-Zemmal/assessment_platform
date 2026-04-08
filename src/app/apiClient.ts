@@ -1,7 +1,22 @@
 type QueryParams = Record<string, string | number | boolean | null | undefined>;
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? "/api";
+  (
+    (import.meta as unknown as { env?: Record<string, string | undefined> })
+      .env?.VITE_API_BASE_URL
+  ) ?? "/api";
+
+function handleAuthFailure(path: string, status: number) {
+  if (status !== 401 && status !== 403) return;
+
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  const isAuthEndpoint = normalizedPath.startsWith("auth/");
+  if (isAuthEndpoint) return;
+
+  if (window.location.pathname !== "/") {
+    window.location.href = "/";
+  }
+}
 
 function buildUrl(path: string, params?: QueryParams): string {
   const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
@@ -70,6 +85,7 @@ export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> 
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
+    handleAuthFailure(path, response.status);
     const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
     throw new Error(message);
   }
@@ -106,6 +122,7 @@ export async function apiPost<T>(
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
+    handleAuthFailure(path, response.status);
     const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
     throw new Error(message);
   }
@@ -142,6 +159,7 @@ export async function apiPatch<T>(
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
+    handleAuthFailure(path, response.status);
     const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
     throw new Error(message);
   }
@@ -178,6 +196,7 @@ export async function apiPut<T>(
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
+    handleAuthFailure(path, response.status);
     const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
     throw new Error(message);
   }
@@ -208,6 +227,7 @@ export async function apiDelete<T>(path: string, params?: QueryParams): Promise<
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
+    handleAuthFailure(path, response.status);
     const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
     throw new Error(message);
   }

@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { ArrowLeft, CheckCircle, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle,
+  CheckCircle2,
+  MinusCircle,
+  XCircle,
+} from "lucide-react";
 import { Button } from "../../components/ui/button";
 import {
   Card,
@@ -13,7 +20,7 @@ import { Alert, AlertDescription } from "../../components/ui/alert";
 import { Progress } from "../../components/ui/progress";
 import { Skeleton } from "../../components/ui/skeleton";
 import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
-import { getCurrentUser } from "../../mockData";
+import { useAuth } from "../../contexts/AuthContext";
 import { apiGet } from "../../apiClient";
 
 type StudentResultsApiResponse = {
@@ -55,10 +62,71 @@ type StudentResultsApiResponse = {
   };
 };
 
+type AnswerVisualStatus = "correct" | "partial" | "incorrect";
+
+function normalizeAnswerText(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function getAnswerVisualStatus(answer: {
+  answer: string;
+  correctAnswer: string | null;
+  autoScore: number;
+  points: number;
+}): AnswerVisualStatus {
+  const score = Math.max(0, Number(answer.autoScore ?? 0));
+  const maxPoints = Math.max(1, Number(answer.points ?? 0));
+
+  if (answer.correctAnswer) {
+    return normalizeAnswerText(answer.answer) ===
+      normalizeAnswerText(answer.correctAnswer)
+      ? "correct"
+      : "incorrect";
+  }
+
+  const ratio = score / maxPoints;
+  if (ratio >= 0.8) return "correct";
+  if (ratio >= 0.4) return "partial";
+  return "incorrect";
+}
+
+function getStatusTheme(status: AnswerVisualStatus) {
+  if (status === "correct") {
+    return {
+      label: "Correct",
+      rowClass: "border-green-200 bg-green-50/70",
+      badgeClass: "bg-green-100 text-green-800 border-green-200",
+      answerBoxClass: "border-green-200 bg-green-50/50",
+      scoreClass: "text-green-700",
+      progressClass: "bg-green-100",
+    };
+  }
+
+  if (status === "partial") {
+    return {
+      label: "Partial",
+      rowClass: "border-amber-200 bg-amber-50/70",
+      badgeClass: "bg-amber-100 text-amber-800 border-amber-200",
+      answerBoxClass: "border-amber-200 bg-amber-50/50",
+      scoreClass: "text-amber-700",
+      progressClass: "bg-amber-100",
+    };
+  }
+
+  return {
+    label: "Needs Review",
+    rowClass: "border-red-200 bg-red-50/70",
+    badgeClass: "bg-red-100 text-red-800 border-red-200",
+    answerBoxClass: "border-red-200 bg-red-50/50",
+    scoreClass: "text-red-700",
+    progressClass: "bg-red-100",
+  };
+}
+
 export default function StudentResults() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [apiData, setApiData] = useState<StudentResultsApiResponse | null>(
     null,
   );
@@ -67,23 +135,21 @@ export default function StudentResults() {
   const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
   useEffect(() => {
-    if (!id || currentUser.role !== "student") {
+    if (!id || !user || user.role !== "student") {
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setLoadError(null);
-    apiGet<StudentResultsApiResponse>(`student/results/${id}`, {
-      student_id: currentUser.id,
-    })
+    apiGet<StudentResultsApiResponse>(`student/results/${id}`)
       .then((data) => setApiData(data))
       .catch(() => {
         setApiData(null);
         setLoadError("Could not load results from backend.");
       })
       .finally(() => setLoading(false));
-  }, [id, currentUser.id, currentUser.role]);
+  }, [id, user]);
 
   if (showLoadingSkeleton) {
     return (
@@ -186,12 +252,27 @@ export default function StudentResults() {
       ? 0
       : Math.round((answeredCount / uiSubmission.answers.length) * 100);
 
-  const questionBreakdown = uiSubmission.answers.map((answer, index) => ({
-    id: answer.questionId,
-    label: `Question ${index + 1}`,
-    score: answer.autoScore,
-    maxScore: answer.points,
-  }));
+  const questionBreakdown = uiSubmission.answers.map((answer, index) => {
+    const status = getAnswerVisualStatus(answer);
+    return {
+      id: answer.questionId,
+      label: `Question ${index + 1}`,
+      score: answer.autoScore,
+      maxScore: answer.points,
+      status,
+    };
+  });
+
+  const outcomeSummary = questionBreakdown.reduce(
+    (acc, item) => {
+      acc[item.status] += 1;
+      return acc;
+    },
+    { correct: 0, partial: 0, incorrect: 0 } as Record<
+      AnswerVisualStatus,
+      number
+    >,
+  );
 
   return (
     <div className="p-3 sm:p-6 lg:p-8 max-w-5xl mx-auto">
@@ -353,12 +434,44 @@ export default function StudentResults() {
                   {questionBreakdown.map((item) => (
                     <div
                       key={item.id}
-                      className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 rounded-md border border-gray-200 px-3 py-2"
+                      className={`rounded-md border px-3 py-3 ${getStatusTheme(item.status).rowClass}`}
                     >
-                      <p className="text-sm text-gray-700">{item.label}</p>
-                      <p className="text-sm font-medium text-gray-900">
-                        {item.score} / {item.maxScore}
-                      </p>
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-gray-800">
+                          {item.label}
+                        </p>
+                        <Badge
+                          variant="outline"
+                          className={getStatusTheme(item.status).badgeClass}
+                        >
+                          {getStatusTheme(item.status).label}
+                        </Badge>
+                      </div>
+                      <div className="mt-2 flex items-center gap-3">
+                        <div className="h-2 flex-1 rounded-full bg-white/80">
+                          <div
+                            className={`h-2 rounded-full ${getStatusTheme(item.status).progressClass}`}
+                            style={{
+                              width: `${Math.max(
+                                0,
+                                Math.min(
+                                  100,
+                                  Math.round(
+                                    (Number(item.score || 0) /
+                                      Math.max(1, Number(item.maxScore || 0))) *
+                                      100,
+                                  ),
+                                ),
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                        <p
+                          className={`text-sm font-semibold ${getStatusTheme(item.status).scoreClass}`}
+                        >
+                          {item.score} / {item.maxScore}
+                        </p>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -377,22 +490,49 @@ export default function StudentResults() {
                 {uiSubmission.answers.map((answer, index) => (
                   <div
                     key={answer.questionId}
-                    className="pb-6 border-b last:border-b-0"
+                    className={`rounded-lg border p-4 shadow-sm transition-all duration-200 ease-out hover:shadow-md sm:p-5 ${getStatusTheme(getAnswerVisualStatus(answer)).rowClass}`}
                   >
                     <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant="outline">Question {index + 1}</Badge>
                         <Badge variant="outline">{answer.questionType}</Badge>
+                        <Badge
+                          variant="outline"
+                          className={
+                            getStatusTheme(getAnswerVisualStatus(answer))
+                              .badgeClass
+                          }
+                        >
+                          {getAnswerVisualStatus(answer) === "correct" && (
+                            <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                          )}
+                          {getAnswerVisualStatus(answer) === "partial" && (
+                            <AlertTriangle className="h-3.5 w-3.5 mr-1" />
+                          )}
+                          {getAnswerVisualStatus(answer) === "incorrect" && (
+                            <MinusCircle className="h-3.5 w-3.5 mr-1" />
+                          )}
+                          {getStatusTheme(getAnswerVisualStatus(answer)).label}
+                        </Badge>
                       </div>
-                      <span className="text-sm text-gray-500">
-                        {answer.points} points
-                      </span>
+                      <div className="text-right">
+                        <span className="text-sm text-gray-500">
+                          {answer.points} points
+                        </span>
+                        <p
+                          className={`text-sm font-semibold ${getStatusTheme(getAnswerVisualStatus(answer)).scoreClass}`}
+                        >
+                          Score: {answer.autoScore}/{answer.points}
+                        </p>
+                      </div>
                     </div>
 
                     <p className="text-gray-900 mb-3">{answer.questionText}</p>
 
                     <div className="space-y-2">
-                      <div>
+                      <div
+                        className={`rounded-md border p-3 ${getStatusTheme(getAnswerVisualStatus(answer)).answerBoxClass}`}
+                      >
                         <p className="text-sm font-medium text-gray-600">
                           Your Answer:
                         </p>
@@ -406,7 +546,7 @@ export default function StudentResults() {
                       </div>
 
                       {answer.correctAnswer && (
-                        <div>
+                        <div className="rounded-md border border-green-200 bg-green-50/70 p-3">
                           <p className="text-sm font-medium text-gray-600">
                             Correct Answer:
                           </p>

@@ -161,7 +161,7 @@ export default function StudentDashboard() {
           Student Dashboard
         </h1>
         <p className="text-gray-500 mt-1">
-          Welcome back, {dashboardData?.studentName ?? currentUser.name}!
+          Welcome back, {dashboardData?.studentName ?? user?.name ?? "Student"}!
         </p>
       </div>
 

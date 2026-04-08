@@ -2,6 +2,7 @@ import json
 from collections import defaultdict
 
 from django.db.models import Q
+from django.contrib.auth.decorators import login_required, user_passes_test
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
@@ -18,18 +19,21 @@ from apps.assessments.models import (
 )
 from apps.common.utils import (
     assessment_status,
-    required_int,
     to_float,
     to_percentage,
     visibility_payload,
 )
 
 
+def is_teacher(user):
+    return getattr(getattr(user, "role", None), "name", "").lower() == "teacher"
+
+
+@login_required
+@user_passes_test(is_teacher)
 @require_GET
 def teacher_profile(request):
-    teacher_id, error = required_int(request, "user_id")
-    if error:
-        return error
+    teacher_id = request.user.id
 
     try:
         user = User.objects.select_related("role").get(id=teacher_id)
@@ -66,11 +70,11 @@ def teacher_profile(request):
     return JsonResponse(payload)
 
 
+@login_required
+@user_passes_test(is_teacher)
 @require_GET
 def teacher_result_visibility_list(request):
-    teacher_id, error = required_int(request, "teacher_id")
-    if error:
-        return error
+    teacher_id = request.user.id
 
     module_ids = list(
         ModuleTeacher.objects.filter(user_id=teacher_id).values_list("module_id", flat=True)
@@ -118,11 +122,11 @@ def teacher_result_visibility_list(request):
 
 
 @csrf_exempt
+@login_required
+@user_passes_test(is_teacher)
 @require_http_methods(["PATCH"])
 def teacher_result_visibility_update(request, assessment_id):
-    teacher_id, error = required_int(request, "teacher_id")
-    if error:
-        return error
+    teacher_id = request.user.id
 
     try:
         assessment = Assessment.objects.select_related("module").get(id=assessment_id)
@@ -169,11 +173,11 @@ def teacher_result_visibility_update(request, assessment_id):
     )
 
 
+@login_required
+@user_passes_test(is_teacher)
 @require_GET
 def teacher_analytics(request):
-    teacher_id, error = required_int(request, "teacher_id")
-    if error:
-        return error
+    teacher_id = request.user.id
 
     module_ids = list(
         ModuleTeacher.objects.filter(user_id=teacher_id).values_list("module_id", flat=True)

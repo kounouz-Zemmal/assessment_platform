@@ -1,4 +1,4 @@
-import { Outlet, useNavigate, useLocation } from "react-router";
+import { Outlet, useNavigate, useLocation, Navigate } from "react-router";
 import { useState } from "react";
 import {
   LayoutDashboard,
@@ -17,7 +17,6 @@ import {
   SheetTitle,
 } from "../components/ui/sheet";
 import { useAuth } from "../contexts/AuthContext";
-import Unauthorized from "../pages/Unauthorized";
 
 export default function StudentLayout() {
   const navigate = useNavigate();
@@ -26,11 +25,25 @@ export default function StudentLayout() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   if (loading) {
-    return <div className="flex items-center justify-center h-screen">Loading...</div>;
+    return (
+      <div className="flex items-center justify-center h-screen">
+        Loading...
+      </div>
+    );
   }
 
-  if (!user || user.role !== "student") {
-    return <Unauthorized />;
+  if (!user) {
+    return <Navigate to="/" replace />;
+  }
+
+  if (user.role !== "student") {
+    const fallbackPath =
+      user.role === "teacher"
+        ? "/teacher"
+        : user.role === "admin"
+          ? "/admin"
+          : "/";
+    return <Navigate to={fallbackPath} replace />;
   }
 
   const navigation = [
