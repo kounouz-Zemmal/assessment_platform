@@ -12,9 +12,6 @@ import {
   BookOpen,
   AlertCircle,
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
-import { Button } from "../../components/ui/button";
-import { StatusBadge } from "../../components/StatusBadge";
 import { apiGet } from "../../apiClient";
 import { useAuth } from "../../contexts/AuthContext";
 
@@ -42,6 +39,19 @@ const injectStyles = () => {
       0%   { box-shadow: 0 0 0 0 rgba(99,102,241,.35); }
       70%  { box-shadow: 0 0 0 8px rgba(99,102,241,0); }
       100% { box-shadow: 0 0 0 0 rgba(99,102,241,0); }
+    }
+    @keyframes td-bg-pan {
+      from { background-position: 0% 0%; }
+      to { background-position: 100% 100%; }
+    }
+    @keyframes td-soft-float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-2px); }
+    }
+
+    .td-root {
+      background-size: 180% 180%;
+      animation: td-bg-pan 18s ease-in-out infinite alternate;
     }
 
     .td-animate-1 { animation: td-fade-up .5s ease both; }
@@ -165,6 +175,7 @@ const injectStyles = () => {
       letter-spacing: .04em;
       text-transform: uppercase;
       margin-bottom: 10px;
+      animation: td-soft-float 3.2s ease-in-out infinite;
     }
 
     .td-card {
@@ -172,6 +183,12 @@ const injectStyles = () => {
       border: 1px solid rgba(0,0,0,.07);
       background: #fff;
       box-shadow: 0 1px 4px rgba(0,0,0,.05);
+      transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+    }
+    .td-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(99,102,241,.22);
+      box-shadow: 0 10px 26px rgba(79,70,229,.12);
     }
     .td-card-header {
       padding: 20px 22px 0;
@@ -267,7 +284,6 @@ export default function TeacherDashboard() {
     activeAssessments: Array<{
       id: string;
       title: string;
-      status: string;
       duration: number;
       startTime: string | null;
     }>;
@@ -328,7 +344,10 @@ export default function TeacherDashboard() {
       style={{
         minHeight: "100vh",
         background: "linear-gradient(160deg, #f8f7ff 0%, #fafaf9 50%, #f0fdf4 100%)",
-        padding: "32px 28px",
+        padding: "clamp(16px, 2.4vw, 32px)",
+        width: "100%",
+        maxWidth: 1320,
+        margin: "0 auto",
       }}
     >
       {/* ── Hero header ── */}
@@ -386,9 +405,10 @@ export default function TeacherDashboard() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))",
           gap: 16,
           marginBottom: 28,
+          alignItems: "stretch",
         }}
       >
         {statCards.map((card, i) => (
@@ -410,9 +430,10 @@ export default function TeacherDashboard() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
           gap: 20,
           marginBottom: 24,
+          alignItems: "start",
         }}
       >
         {/* Quick Actions */}
@@ -509,7 +530,7 @@ export default function TeacherDashboard() {
                         · {a.duration} min
                       </p>
                     </div>
-                    <StatusBadge status={a.status} />
+                    <ArrowRight size={14} color="#9ca3af" />
                   </div>
                 ))}
               </div>
