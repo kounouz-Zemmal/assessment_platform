@@ -203,3 +203,6 @@ STATIC_URL = "static/"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Flask AI microservice (ai_mvp) — POST body is proxied as-is to /api/ai/generate
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:5000/api/ai/generate")

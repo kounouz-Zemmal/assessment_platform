@@ -77,6 +77,19 @@ class AssessmentQuestion(models.Model):
         unique_together = (("assessment", "question"), ("assessment", "sort_order"))
 
 
+class Choice(models.Model):
+    question = models.ForeignKey(Question, models.DO_NOTHING)
+    content = models.TextField()
+    is_correct = models.BooleanField()
+    sort_order = models.IntegerField()
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "choices"
+
+
 class Attempt(models.Model):
     student = models.ForeignKey(User, models.DO_NOTHING)
     assessment = models.ForeignKey(Assessment, models.DO_NOTHING)
