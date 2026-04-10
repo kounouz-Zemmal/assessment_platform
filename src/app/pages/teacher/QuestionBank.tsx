@@ -1,31 +1,93 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Plus, Search, Pencil, Trash2, Filter } from "lucide-react";
+import { Plus, Search, Pencil, Trash2 } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
-import { Card, CardContent, CardHeader } from "../../components/ui/card";
+import { Card, CardContent } from "../../components/ui/card";
 import { Badge } from "../../components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
-import { questions, modules, getCurrentUser } from "../../mockData";
 import { QuestionType } from "../../types";
 import { toast } from "sonner";
+import { apiDelete, apiGet } from "../../apiClient";
 
 export default function TeacherQuestionBank() {
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
   const [searchQuery, setSearchQuery] = useState("");
   const [filterModule, setFilterModule] = useState("all");
+  const [filterTopic, setFilterTopic] = useState("all");
   const [filterType, setFilterType] = useState("all");
+  const [sortBy, setSortBy] = useState("newest");
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [questions, setQuestions] = useState<
+    Array<{
+      id: string;
+      moduleId: string;
+      moduleCode: string;
+      moduleName: string;
+      topicId: string;
+      topicName: string;
+      type: QuestionType;
+      text: string;
+      points: number;
+      options?: string[];
+      keywords?: Array<{ text: string; weight: number }>;
+    }>
+  >([]);
+  const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
+  const [modules, setModules] = useState<Array<{ id: string; code: string; name: string; topics: Array<{ id: string; name: string }> }>>([]);
 
-  const myQuestions = questions.filter((q) => q.createdBy === currentUser.id);
+  useEffect(() => {
+    apiGet<{ modules: Array<{ id: string; code: string; name: string; topics: Array<{ id: string; name: string }> }> }>("teacher/modules")
+      .then((data) => setModules(data.modules))
+      .catch(() => setModules([]));
+  }, []);
 
-  const filteredQuestions = myQuestions.filter((question) => {
-    const matchesSearch = question.text.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesModule = filterModule === "all" || question.moduleId === filterModule;
-    const matchesType = filterType === "all" || question.type === filterType;
-    
-    return matchesSearch && matchesModule && matchesType;
-  });
+  useEffect(() => {
+    const params: Record<string, string | number> = {
+      page,
+      page_size: 12,
+      sort: sortBy,
+    };
+    if (searchQuery.trim()) params.search = searchQuery.trim();
+    if (filterModule !== "all") params.module_id = filterModule;
+    if (filterTopic !== "all") params.topic_id = filterTopic;
+    if (filterType !== "all") params.type = filterType;
+
+    setLoading(true);
+    setError(null);
+    apiGet<{ questions: typeof questions; pagination: { page: number; totalPages: number; total: number } }>("teacher/questions", params)
+      .then((data) => {
+        setQuestions(data.questions);
+        setPagination(data.pagination);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load questions"))
+      .finally(() => setLoading(false));
+  }, [searchQuery, filterModule, filterTopic, filterType, sortBy, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, filterModule, filterTopic, filterType, sortBy]);
+
+  useEffect(() => {
+    setFilterTopic("all");
+  }, [filterModule]);
+
+  const topicsForSelectedModule = useMemo(() => {
+    if (filterModule === "all") return [];
+    return modules.find((module) => module.id === filterModule)?.topics ?? [];
+  }, [modules, filterModule]);
+
+  const handleDelete = async (questionId: string) => {
+    try {
+      await apiDelete<{ deleted: boolean }>(`teacher/questions/${questionId}`);
+      toast.success("Question deleted");
+      setQuestions((prev) => prev.filter((question) => question.id !== questionId));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete question");
+    }
+  };
 
   const getTypeColor = (type: QuestionType) => {
     const colors: Record<QuestionType, string> = {
@@ -76,6 +138,19 @@ export default function TeacherQuestionBank() {
                 ))}
               </SelectContent>
             </Select>
+            <Select value={filterTopic} onValueChange={setFilterTopic} disabled={filterModule === "all"}>
+              <SelectTrigger>
+                <SelectValue placeholder="Filter by topic" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Topics</SelectItem>
+                {topicsForSelectedModule.map((topic) => (
+                  <SelectItem key={topic.id} value={topic.id}>
+                    {topic.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Select value={filterType} onValueChange={setFilterType}>
               <SelectTrigger>
                 <SelectValue placeholder="Filter by type" />
@@ -88,13 +163,37 @@ export default function TeacherQuestionBank() {
                 <SelectItem value="Descriptive">Descriptive</SelectItem>
               </SelectContent>
             </Select>
+            <Select value={sortBy} onValueChange={setSortBy}>
+              <SelectTrigger>
+                <SelectValue placeholder="Sort by" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="newest">Newest</SelectItem>
+                <SelectItem value="year_desc">By Year (Newest)</SelectItem>
+                <SelectItem value="year_asc">By Year (Oldest)</SelectItem>
+                <SelectItem value="alphabetical_asc">Alphabetical (A-Z)</SelectItem>
+                <SelectItem value="alphabetical_desc">Alphabetical (Z-A)</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </CardContent>
       </Card>
 
       {/* Questions List */}
       <div className="space-y-4">
-        {filteredQuestions.length === 0 ? (
+        {loading ? (
+          <Card>
+            <CardContent className="py-12 text-center">
+              <p className="text-gray-500">Loading questions...</p>
+            </CardContent>
+          </Card>
+        ) : error ? (
+          <Card>
+            <CardContent className="py-12 text-center">
+              <p className="text-red-600">{error}</p>
+            </CardContent>
+          </Card>
+        ) : questions.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
               <p className="text-gray-500">No questions found</p>
@@ -108,10 +207,7 @@ export default function TeacherQuestionBank() {
             </CardContent>
           </Card>
         ) : (
-          filteredQuestions.map((question) => {
-            const module = modules.find((m) => m.id === question.moduleId);
-            const topic = module?.topics.find((t) => t.id === question.topicId);
-            
+          questions.map((question) => {
             return (
               <Card key={question.id} className="hover:shadow-md transition-shadow">
                 <CardContent className="p-6">
@@ -122,11 +218,11 @@ export default function TeacherQuestionBank() {
                           {question.type}
                         </Badge>
                         <Badge variant="outline">
-                          {module?.code}
+                          {question.moduleCode}
                         </Badge>
-                        {topic && (
+                        {question.topicName && (
                           <Badge variant="outline" className="text-xs">
-                            {topic.name}
+                            {question.topicName}
                           </Badge>
                         )}
                         <span className="text-sm text-gray-500 ml-auto">
@@ -170,7 +266,7 @@ export default function TeacherQuestionBank() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => toast.success("Question deleted")}
+                        onClick={() => handleDelete(question.id)}
                       >
                         <Trash2 className="h-4 w-4 text-red-600" />
                       </Button>
@@ -182,6 +278,25 @@ export default function TeacherQuestionBank() {
           })
         )}
       </div>
+      {!loading && !error && pagination.totalPages > 1 && (
+        <div className="mt-6 flex items-center justify-between">
+          <p className="text-sm text-gray-500">
+            Showing page {pagination.page} of {pagination.totalPages} ({pagination.total} total)
+          </p>
+          <div className="flex gap-2">
+            <Button variant="outline" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              disabled={page >= pagination.totalPages}
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

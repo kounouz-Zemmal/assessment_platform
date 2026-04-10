@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { ArrowLeft, Plus, X } from "lucide-react";
+import { ArrowLeft, Plus, X, Sparkles } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
@@ -9,32 +9,73 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/ca
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { RadioGroup, RadioGroupItem } from "../../components/ui/radio-group";
 import { Badge } from "../../components/ui/badge";
-import { modules, questions } from "../../mockData";
 import { QuestionType } from "../../types";
 import { toast } from "sonner";
+import { apiGet, apiPatch, apiPost } from "../../apiClient";
 
 export default function TeacherCreateQuestion() {
   const navigate = useNavigate();
   const { id } = useParams();
   const isEditing = !!id;
-  
-  const existingQuestion = id ? questions.find((q) => q.id === id) : null;
+  const [loading, setLoading] = useState(true);
+  const [submitLoading, setSubmitLoading] = useState(false);
+  const [topicCreating, setTopicCreating] = useState(false);
+  const [showQuickTopicForm, setShowQuickTopicForm] = useState(false);
+  const [quickTopicName, setQuickTopicName] = useState("");
+  const [modules, setModules] = useState<Array<{ id: string; code: string; name: string; topics: Array<{ id: string; name: string }> }>>([]);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
   const [formData, setFormData] = useState({
-    moduleId: existingQuestion?.moduleId || "",
-    topicId: existingQuestion?.topicId || "",
-    type: existingQuestion?.type || "MCQ" as QuestionType,
-    text: existingQuestion?.text || "",
-    points: existingQuestion?.points || 2,
-    options: existingQuestion?.options || ["", "", "", ""],
-    correctAnswer: existingQuestion?.correctAnswer || "",
-    referenceAnswer: existingQuestion?.referenceAnswer || "",
-    keywords: existingQuestion?.keywords || [],
+    moduleId: "",
+    topicId: "",
+    type: "MCQ" as QuestionType,
+    difficulty: "Medium",
+    status: "Draft",
+    text: "",
+    options: ["", "", "", ""],
+    correctAnswer: "",
+    referenceAnswer: "",
+    keywords: [] as Array<{ text: string; weight: number; synonyms?: string[] }>,
   });
 
-const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText: "" });
+  const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText: "" });
 
-  const selectedModule = modules.find((m) => m.id === formData.moduleId);
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      apiGet<{ modules: Array<{ id: string; code: string; name: string; topics: Array<{ id: string; name: string }> }> }>("teacher/modules"),
+      isEditing ? apiGet<{ question: any }>(`teacher/questions/${id}`) : Promise.resolve(null),
+    ])
+      .then(([modulesData, questionData]) => {
+        setModules(modulesData.modules);
+        if (questionData?.question) {
+          setFormData({
+            moduleId: questionData.question.moduleId || "",
+            topicId: questionData.question.topicId || "",
+            type: questionData.question.type || "MCQ",
+            difficulty: questionData.question.difficulty || "Medium",
+            status: questionData.question.status || "Draft",
+            text: questionData.question.text || "",
+            options:
+              questionData.question.options && questionData.question.options.length > 0
+                ? questionData.question.options
+                : ["", "", "", ""],
+            correctAnswer: questionData.question.correctAnswer || "",
+            referenceAnswer: questionData.question.referenceAnswer || "",
+            keywords: questionData.question.keywords || [],
+          });
+        }
+      })
+      .catch((err) => {
+        toast.error(err instanceof Error ? err.message : "Failed to load question form");
+      })
+      .finally(() => setLoading(false));
+  }, [id, isEditing]);
+
+  const selectedModule = useMemo(
+    () => modules.find((m) => m.id === formData.moduleId),
+    [modules, formData.moduleId]
+  );
 
   const handleAddKeyword = () => {
     if (!newKeyword.text.trim()) return;
@@ -70,20 +111,82 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!formData.moduleId || !formData.topicId || !formData.text) {
-      toast.error("Please fill in all required fields");
-      return;
-    }
+    setSubmitLoading(true);
+    setFormErrors({});
 
-    if (formData.type === "Descriptive" && formData.keywords.length === 0) {
-      toast.error("Please add at least one keyword for descriptive questions");
-      return;
-    }
+    const payload = {
+      moduleId: formData.moduleId,
+      topicId: formData.topicId || null,
+      type: formData.type,
+      difficulty: formData.difficulty,
+      status: formData.status,
+      text: formData.text,
+      options:
+        formData.type === "MCQ" || formData.type === "SCQ"
+          ? formData.options.filter((option) => option.trim())
+          : [],
+      correctAnswer: formData.correctAnswer,
+      referenceAnswer: formData.referenceAnswer,
+      keywords: formData.keywords,
+    };
 
-    toast.success(isEditing ? "Question updated successfully" : "Question created successfully");
-    navigate("/teacher/questions");
+    const request = isEditing
+      ? apiPatch<{ question: { id: string } }>(`teacher/questions/${id}`, payload)
+      : apiPost<{ question: { id: string } }>("teacher/questions", payload);
+
+    request
+      .then(() => {
+        toast.success(isEditing ? "Question updated successfully" : "Question created successfully");
+        navigate("/teacher/questions");
+      })
+      .catch((err: any) => {
+        const message = err instanceof Error ? err.message : "Failed to save question";
+        if (err && typeof err === "object" && "errors" in err && err.errors) {
+          setFormErrors(err.errors as Record<string, string>);
+        }
+        toast.error(message);
+      })
+      .finally(() => setSubmitLoading(false));
   };
+
+  const difficultyPoints = formData.difficulty === "Easy" ? 1 : formData.difficulty === "Hard" ? 3 : 2;
+
+  const handleQuickCreateTopic = async () => {
+    if (!formData.moduleId) {
+      toast.error("Select a module first");
+      return;
+    }
+    if (!quickTopicName.trim()) {
+      toast.error("Topic name is required");
+      return;
+    }
+    setTopicCreating(true);
+    try {
+      const created = await apiPost<{ topic: { id: string; name: string; moduleId: string } }>("teacher/topics", {
+        moduleId: formData.moduleId,
+        name: quickTopicName.trim(),
+      });
+      setModules((prev) =>
+        prev.map((module) =>
+          module.id === formData.moduleId
+            ? { ...module, topics: [...module.topics, { id: created.topic.id, name: created.topic.name }] }
+            : module
+        )
+      );
+      setFormData((prev) => ({ ...prev, topicId: created.topic.id }));
+      setQuickTopicName("");
+      setShowQuickTopicForm(false);
+      toast.success("Topic created");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create topic");
+    } finally {
+      setTopicCreating(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="p-8 text-gray-500">Loading question form...</div>;
+  }
 
   return (
     <div className="p-8">
@@ -117,7 +220,10 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
                 <Label htmlFor="module">Module *</Label>
                 <Select
                   value={formData.moduleId}
-                  onValueChange={(value) => setFormData({ ...formData, moduleId: value, topicId: "" })}
+                  onValueChange={(value) => {
+                    setFormData({ ...formData, moduleId: value, topicId: "" });
+                    setFormErrors((prev) => ({ ...prev, moduleId: "" }));
+                  }}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Select module" />
@@ -130,10 +236,24 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
                     ))}
                   </SelectContent>
                 </Select>
+                {formErrors.moduleId && <p className="text-xs text-red-600">{formErrors.moduleId}</p>}
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="topic">Topic *</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="topic">Topic</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-auto p-0 text-blue-600"
+                    onClick={() => setShowQuickTopicForm((value) => !value)}
+                    disabled={!formData.moduleId}
+                  >
+                    <Sparkles className="h-3 w-3 mr-1" />
+                    Quick Create Topic
+                  </Button>
+                </div>
                 <Select
                   value={formData.topicId}
                   onValueChange={(value) => setFormData({ ...formData, topicId: value })}
@@ -150,6 +270,19 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
                     ))}
                   </SelectContent>
                 </Select>
+                {showQuickTopicForm && (
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="New topic name"
+                      value={quickTopicName}
+                      onChange={(e) => setQuickTopicName(e.target.value)}
+                    />
+                    <Button type="button" onClick={handleQuickCreateTopic} disabled={topicCreating}>
+                      Add
+                    </Button>
+                  </div>
+                )}
+                {formErrors.topicId && <p className="text-xs text-red-600">{formErrors.topicId}</p>}
               </div>
             </div>
           </CardContent>
@@ -161,7 +294,7 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
             <CardTitle>Question Details</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-3 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="type">Question Type *</Label>
                 <Select
@@ -181,16 +314,43 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="points">Points *</Label>
-                <Input
-                  id="points"
-                  type="number"
-                  min="1"
-                  value={formData.points}
-                  onChange={(e) => setFormData({ ...formData, points: parseInt(e.target.value) })}
-                />
+                <Label>Difficulty *</Label>
+                <Select
+                  value={formData.difficulty}
+                  onValueChange={(value) => setFormData({ ...formData, difficulty: value })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Easy">Easy</SelectItem>
+                    <SelectItem value="Medium">Medium</SelectItem>
+                    <SelectItem value="Hard">Hard</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Status *</Label>
+                <Select
+                  value={formData.status}
+                  onValueChange={(value) => setFormData({ ...formData, status: value })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Draft">Draft</SelectItem>
+                    <SelectItem value="Pending Review">Pending Review</SelectItem>
+                    <SelectItem value="Approved">Approved</SelectItem>
+                    <SelectItem value="Rejected">Rejected</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
+            <p className="text-sm text-gray-500">
+              Points are assigned automatically from difficulty: Easy=1, Medium=2, Hard=3.
+            </p>
 
             <div className="space-y-2">
               <Label htmlFor="text">Question Text *</Label>
@@ -201,6 +361,7 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
                 placeholder="Enter your question here..."
                 rows={4}
               />
+                {formErrors.text && <p className="text-xs text-red-600">{formErrors.text}</p>}
             </div>
           </CardContent>
         </Card>
@@ -228,6 +389,7 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
                   </div>
                 ))}
               </RadioGroup>
+              {formErrors.correctAnswer && <p className="text-xs text-red-600">{formErrors.correctAnswer}</p>}
               <p className="text-sm text-gray-500">
                 Select the correct answer by clicking the radio button
               </p>
@@ -254,6 +416,7 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
                   <Label htmlFor="false">False</Label>
                 </div>
               </RadioGroup>
+              {formErrors.correctAnswer && <p className="text-xs text-red-600">{formErrors.correctAnswer}</p>}
             </CardContent>
           </Card>
         )}
@@ -344,9 +507,10 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
 
                 {formData.keywords.length > 0 && (
                   <p className="text-sm text-gray-500">
-                    Total weight: {formData.keywords.reduce((sum, kw) => sum + kw.weight, 0)} / {formData.points} points
+                    Total weight: {formData.keywords.reduce((sum, kw) => sum + kw.weight, 0)} / {difficultyPoints} points
                   </p>
                 )}
+                {formErrors.keywords && <p className="text-xs text-red-600">{formErrors.keywords}</p>}
               </CardContent>
             </Card>
           </>
@@ -361,7 +525,7 @@ const [newKeyword, setNewKeyword] = useState({ text: "", weight: 1, synonymsText
           >
             Cancel
           </Button>
-          <Button type="submit">
+          <Button type="submit" disabled={submitLoading}>
             {isEditing ? "Update Question" : "Create Question"}
           </Button>
         </div>

@@ -1,25 +1,48 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, BookOpen } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Input } from "../../components/ui/input";
 import { Badge } from "../../components/ui/badge";
-import { modules, teacherAssignments, getCurrentUser } from "../../mockData";
+import { apiGet } from "../../apiClient";
+import { useAuth } from "../../contexts/AuthContext";
 
 export default function TeacherModules() {
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [modules, setModules] = useState<
+    Array<{
+      id: string;
+      code: string;
+      name: string;
+      description: string;
+      teachingRole: string;
+      topics: Array<{ id: string; name: string }>;
+    }>
+  >([]);
 
-  const myAssignments = teacherAssignments.filter(
-    (a) => a.teacherId === currentUser.id
-  );
-  const myModuleIds = myAssignments.map((a) => a.moduleId);
+  useEffect(() => {
+    if (!user || user.role !== "teacher") {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    apiGet<{ modules: Array<{ id: string; code: string; name: string; description: string; teachingRole: string; topics: Array<{ id: string; name: string }> }> }>("teacher/modules")
+      .then((data) => setModules(data.modules))
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load modules"))
+      .finally(() => setLoading(false));
+  }, [user]);
 
-  const myModules = modules.filter((m) => myModuleIds.includes(m.id));
-
-  const filtered = myModules.filter(
-    (m) =>
+  const filtered = useMemo(
+    () =>
+      modules.filter(
+        (m) =>
       m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       m.code.toLowerCase().includes(searchQuery.toLowerCase())
+      ),
+    [modules, searchQuery]
   );
 
   return (
@@ -43,17 +66,29 @@ export default function TeacherModules() {
         </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {loading ? (
         <Card>
           <CardContent className="py-12 text-center text-gray-500">
-            You are not currently assigned to any modules.
+            Loading modules...
+          </CardContent>
+        </Card>
+      ) : error ? (
+        <Card>
+          <CardContent className="py-12 text-center text-red-600">
+            {error}
+          </CardContent>
+        </Card>
+      ) : filtered.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-gray-500">
+            {modules.length === 0
+              ? "You are not currently assigned to any modules."
+              : "No modules match your search."}
           </CardContent>
         </Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filtered.map((module) => {
-            const assignment = myAssignments.find((a) => a.moduleId === module.id);
-
             return (
               <Card key={module.id}>
                 <CardHeader>
@@ -67,9 +102,7 @@ export default function TeacherModules() {
                         <p className="text-sm text-gray-500">{module.name}</p>
                       </div>
                     </div>
-                    {assignment && (
-                      <Badge variant="outline">{assignment.teachingRole}</Badge>
-                    )}
+                    <Badge variant="outline">{module.teachingRole}</Badge>
                   </div>
                 </CardHeader>
                 <CardContent>

@@ -19,6 +19,19 @@ class Module(models.Model):
         unique_together = (("name", "semester_id"),)
 
 
+class Topic(models.Model):
+    name = models.CharField(max_length=150)
+    module = models.ForeignKey(Module, models.DO_NOTHING)
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField()
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "topics"
+
+
 class ModuleTeacher(models.Model):
     user = models.ForeignKey(User, models.DO_NOTHING)
     module = models.ForeignKey(Module, models.DO_NOTHING)
