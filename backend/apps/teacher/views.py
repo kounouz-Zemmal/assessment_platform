@@ -1,6 +1,9 @@
 import json
+import urllib.error
+import urllib.request
 from collections import defaultdict
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 from django.contrib.auth.decorators import login_required, user_passes_test
@@ -927,3 +930,47 @@ def teacher_question_detail(request, question_id):
             )
         }
     )
+
+
+@csrf_exempt
+@login_required
+@user_passes_test(is_teacher)
+@require_http_methods(["POST"])
+def teacher_ai_generate(request):
+    """Proxy to the Flask AI service (ai_mvp). Body: { question, options: { answer, keywords, improve } }."""
+    url = getattr(settings, "AI_SERVICE_URL", "http://127.0.0.1:5000/api/ai/generate")
+    req = urllib.request.Request(
+        url,
+        data=request.body,
+        method="POST",
+        headers={
+            "Content-Type": request.headers.get("Content-Type", "application/json; charset=utf-8"),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8")
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8")
+        status = e.code
+    except urllib.error.URLError:
+        return JsonResponse(
+            {
+                "error": "AI service is not reachable. Start the Flask app in ai_mvp/ (python app.py) or set AI_SERVICE_URL.",
+                "improved_question": "",
+                "answer": "",
+                "keywords": [],
+            },
+            status=503,
+        )
+
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "Invalid response from AI service"}, status=502)
+
+    if not isinstance(data, dict):
+        return JsonResponse({"error": "Invalid response from AI service"}, status=502)
+
+    return JsonResponse(data, status=status)

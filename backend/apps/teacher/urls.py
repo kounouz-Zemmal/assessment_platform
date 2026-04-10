@@ -25,4 +25,5 @@ urlpatterns = [
         views.teacher_result_visibility_update,
         name="teacher-result-visibility-update",
     ),
+    path("teacher/ai/generate", views.teacher_ai_generate, name="teacher-ai-generate"),
 ]
