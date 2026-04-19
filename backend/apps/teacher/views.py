@@ -4,6 +4,7 @@ import urllib.request
 from collections import defaultdict
 
 from django.conf import settings
+from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.contrib.auth.decorators import login_required, user_passes_test
@@ -12,20 +13,23 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
 from apps.accounts.models import User
-from apps.academics.models import Module, ModuleTeacher, Topic
+from apps.academics.models import Module, ModuleTeacher, StudentGroup, Topic
 from apps.assessments.models import (
     Answer,
+    AnswerKeywordAnalysis,
     Assessment,
     AssessmentQuestion,
     AssessmentResultVisibility,
     Attempt,
     Choice,
+    Feedback,
     Question,
     QuestionKeyword,
     QuestionStat,
 )
 from apps.common.utils import (
     assessment_status,
+    attempt_status,
     to_float,
     to_percentage,
     visibility_payload,
@@ -78,6 +82,147 @@ def _parse_int(value, default_value):
         return parsed
     except (TypeError, ValueError):
         return default_value
+
+
+ASSESSMENT_STATUS_TO_DB = {
+    "Draft": "DRAFT",
+    "Scheduled": "SCHEDULED",
+    "Active": "ACTIVE",
+    "Closed": "CLOSED",
+    "Published": "PUBLISHED",
+}
+
+
+def _is_lecturer_for_module(teacher_id, module_id):
+    assignment = ModuleTeacher.objects.filter(user_id=teacher_id, module_id=module_id).first()
+    if not assignment:
+        return False
+    normalized = (assignment.role_in_module or "").replace("_", " ").strip().lower()
+    return normalized == "lecturer"
+
+
+def _serialize_assessment(
+    assessment,
+    questions_by_assessment_id=None,
+    can_modify_status=False,
+):
+    if questions_by_assessment_id is None:
+        question_ids = list(
+            AssessmentQuestion.objects.filter(assessment_id=assessment.id)
+            .order_by("sort_order", "id")
+            .values_list("question_id", flat=True)
+        )
+    else:
+        question_ids = questions_by_assessment_id.get(assessment.id, [])
+
+    return {
+        "id": str(assessment.id),
+        "title": assessment.title,
+        "moduleId": str(assessment.module_id),
+        "moduleCode": assessment.module.code if getattr(assessment, "module", None) else None,
+        "duration": int(assessment.duration_minutes or 0),
+        "startTime": assessment.start_time.isoformat() if assessment.start_time else None,
+        "endTime": assessment.end_time.isoformat() if assessment.end_time else None,
+        "status": assessment_status(assessment.status),
+        "questions": [str(question_id) for question_id in question_ids],
+        "randomize": bool(assessment.shuffle_questions),
+        "instructions": assessment.instructions or "",
+        "shuffleAnswers": bool(assessment.shuffle_choices),
+        "autoSubmitOnTimeout": bool(assessment.auto_submit),
+        "tabSwitchWarning": bool(assessment.tab_warning),
+        "createdBy": str(assessment.created_by_id),
+        "createdAt": assessment.created_at.isoformat() if assessment.created_at else None,
+        "canModifyStatus": bool(can_modify_status),
+    }
+
+
+def _validate_assessment_payload(payload, teacher_id):
+    errors = {}
+    module_id = payload.get("moduleId")
+    title = (payload.get("title") or "").strip()
+    question_ids_raw = payload.get("selectedQuestions") or payload.get("questions") or []
+    instructions = (payload.get("instructions") or "").strip()
+    duration = payload.get("duration")
+    start_time = payload.get("startTime")
+    end_time = payload.get("endTime")
+    randomize = bool(payload.get("randomize", False))
+    shuffle_answers = bool(payload.get("shuffleAnswers", True))
+    auto_submit_on_timeout = bool(payload.get("autoSubmitOnTimeout", True))
+    tab_switch_warning = bool(payload.get("tabSwitchWarning", False))
+
+    if not title:
+        errors["title"] = "Title is required."
+
+    try:
+        module_id_int = int(module_id)
+    except (TypeError, ValueError):
+        module_id_int = None
+        errors["moduleId"] = "Valid moduleId is required."
+
+    teacher_module_ids = _teacher_module_ids(teacher_id)
+    if module_id_int and module_id_int not in teacher_module_ids:
+        errors["moduleId"] = "You can only create assessments for assigned modules."
+
+    try:
+        duration_int = int(duration)
+        if duration_int <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        duration_int = 0
+        errors["duration"] = "Duration must be a positive integer."
+
+    question_ids = []
+    try:
+        question_ids = [int(question_id) for question_id in question_ids_raw]
+    except (TypeError, ValueError):
+        errors["questions"] = "Questions are invalid."
+    if not question_ids:
+        errors["questions"] = "At least one question is required."
+
+    start_dt = None
+    end_dt = None
+    if start_time:
+        try:
+            start_dt = timezone.datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        except ValueError:
+            errors["startTime"] = "Invalid start time format."
+    if end_time:
+        try:
+            end_dt = timezone.datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+        except ValueError:
+            errors["endTime"] = "Invalid end time format."
+    if start_dt and timezone.is_naive(start_dt):
+        start_dt = timezone.make_aware(start_dt, timezone.get_current_timezone())
+    if end_dt and timezone.is_naive(end_dt):
+        end_dt = timezone.make_aware(end_dt, timezone.get_current_timezone())
+    if start_dt and end_dt and end_dt <= start_dt:
+        errors["endTime"] = "End time must be after start time."
+
+    valid_questions = []
+    if module_id_int and question_ids:
+        valid_questions = list(
+            Question.objects.filter(id__in=question_ids, module_id=module_id_int, deleted_at__isnull=True)
+        )
+        if len(valid_questions) != len(set(question_ids)):
+            errors["questions"] = "All selected questions must belong to the selected module."
+
+    total_points = sum(to_float(question.default_points) for question in valid_questions)
+
+    return {
+        "errors": errors,
+        "title": title,
+        "module_id": module_id_int,
+        "duration": duration_int,
+        "question_ids": question_ids,
+        "start_time": start_dt,
+        "end_time": end_dt,
+        "instructions": instructions,
+        "randomize": randomize,
+        "shuffle_answers": shuffle_answers,
+        "auto_submit_on_timeout": auto_submit_on_timeout,
+        "tab_switch_warning": tab_switch_warning,
+        "total_points": total_points,
+    }
 
 
 def _serialize_question(question, choices_by_question_id, keywords_by_question_id, topics_by_id):
@@ -835,6 +980,772 @@ def teacher_questions(request):
             },
         }
     )
+
+
+@csrf_exempt
+@login_required
+@user_passes_test(is_teacher)
+@require_http_methods(["GET", "POST"])
+def teacher_assessments(request):
+    teacher_id = request.user.id
+    module_ids = _teacher_module_ids(teacher_id)
+
+    if request.method == "POST":
+        try:
+            payload = json.loads(request.body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return JsonResponse({"detail": "Invalid JSON body"}, status=400)
+
+        parsed = _validate_assessment_payload(payload, teacher_id)
+        if parsed["errors"]:
+            return JsonResponse({"detail": "Validation failed", "errors": parsed["errors"]}, status=400)
+
+        now = timezone.now()
+        with transaction.atomic():
+            assessment = Assessment.objects.create(
+                title=parsed["title"],
+                description=parsed["instructions"] or None,
+                instructions=parsed["instructions"] or None,
+                module_id=parsed["module_id"],
+                created_by_id=teacher_id,
+                duration_minutes=parsed["duration"],
+                start_time=parsed["start_time"],
+                end_time=parsed["end_time"],
+                status=ASSESSMENT_STATUS_TO_DB["Draft"],
+                shuffle_questions=parsed["randomize"],
+                shuffle_choices=parsed["shuffle_answers"],
+                auto_submit=parsed["auto_submit_on_timeout"],
+                tab_warning=parsed["tab_switch_warning"],
+                max_attempts=1,
+                show_result_immediately=False,
+                allow_review=True,
+                access_code=None,
+                total_points=parsed["total_points"],
+                created_at=now,
+                updated_at=now,
+                deleted_at=None,
+            )
+
+            question_map = {
+                question.id: question
+                for question in Question.objects.filter(id__in=parsed["question_ids"], deleted_at__isnull=True)
+            }
+            for index, question_id in enumerate(parsed["question_ids"], start=1):
+                question = question_map.get(question_id)
+                if not question:
+                    continue
+                AssessmentQuestion.objects.create(
+                    assessment_id=assessment.id,
+                    question_id=question_id,
+                    points=question.default_points,
+                    sort_order=index,
+                    created_at=now,
+                    updated_at=now,
+                )
+
+        can_modify_status = _is_lecturer_for_module(teacher_id, assessment.module_id)
+        return JsonResponse(
+            {"assessment": _serialize_assessment(assessment, can_modify_status=can_modify_status)},
+            status=201,
+        )
+
+    assessments = list(
+        Assessment.objects.filter(Q(created_by_id=teacher_id) | Q(module_id__in=module_ids), deleted_at__isnull=True)
+        .select_related("module")
+        .order_by("-created_at")
+    )
+    rows = list(
+        AssessmentQuestion.objects.filter(assessment_id__in=[assessment.id for assessment in assessments])
+        .order_by("sort_order", "id")
+        .values("assessment_id", "question_id")
+    )
+    questions_by_assessment_id = defaultdict(list)
+    for row in rows:
+        questions_by_assessment_id[row["assessment_id"]].append(row["question_id"])
+
+    return JsonResponse(
+        {
+            "assessments": [
+                _serialize_assessment(
+                    assessment,
+                    questions_by_assessment_id,
+                    can_modify_status=_is_lecturer_for_module(teacher_id, assessment.module_id),
+                )
+                for assessment in assessments
+            ]
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+@user_passes_test(is_teacher)
+@require_http_methods(["GET", "PATCH"])
+def teacher_assessment_detail(request, assessment_id):
+    teacher_id = request.user.id
+    module_ids = _teacher_module_ids(teacher_id)
+    try:
+        assessment = Assessment.objects.select_related("module").get(id=assessment_id, deleted_at__isnull=True)
+    except Assessment.DoesNotExist:
+        return JsonResponse({"detail": "Assessment not found"}, status=404)
+
+    if not (assessment.created_by_id == teacher_id or assessment.module_id in module_ids):
+        return JsonResponse({"detail": "Not allowed for this assessment"}, status=403)
+
+    if request.method == "GET":
+        return JsonResponse(
+            {
+                "assessment": _serialize_assessment(
+                    assessment,
+                    can_modify_status=_is_lecturer_for_module(teacher_id, assessment.module_id),
+                )
+            }
+        )
+
+    if assessment.created_by_id != teacher_id:
+        return JsonResponse({"detail": "Only the creator can edit this assessment"}, status=403)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"detail": "Invalid JSON body"}, status=400)
+
+    parsed = _validate_assessment_payload(payload, teacher_id)
+    if parsed["errors"]:
+        return JsonResponse({"detail": "Validation failed", "errors": parsed["errors"]}, status=400)
+
+    now = timezone.now()
+    assessment.title = parsed["title"]
+    assessment.description = parsed["instructions"] or None
+    assessment.instructions = parsed["instructions"] or None
+    assessment.module_id = parsed["module_id"]
+    assessment.duration_minutes = parsed["duration"]
+    assessment.start_time = parsed["start_time"]
+    assessment.end_time = parsed["end_time"]
+    assessment.shuffle_questions = parsed["randomize"]
+    assessment.shuffle_choices = parsed["shuffle_answers"]
+    assessment.auto_submit = parsed["auto_submit_on_timeout"]
+    assessment.tab_warning = parsed["tab_switch_warning"]
+    assessment.total_points = parsed["total_points"]
+    assessment.updated_at = now
+    assessment.save()
+
+    with transaction.atomic():
+        AssessmentQuestion.objects.filter(assessment_id=assessment.id).delete()
+        question_map = {
+            question.id: question
+            for question in Question.objects.filter(id__in=parsed["question_ids"], deleted_at__isnull=True)
+        }
+        for index, question_id in enumerate(parsed["question_ids"], start=1):
+            question = question_map.get(question_id)
+            if not question:
+                continue
+            AssessmentQuestion.objects.create(
+                assessment_id=assessment.id,
+                question_id=question_id,
+                points=question.default_points,
+                sort_order=index,
+                created_at=now,
+                updated_at=now,
+            )
+
+    return JsonResponse(
+        {
+            "assessment": _serialize_assessment(
+                assessment,
+                can_modify_status=_is_lecturer_for_module(teacher_id, assessment.module_id),
+            )
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+@user_passes_test(is_teacher)
+@require_http_methods(["PATCH"])
+def teacher_assessment_status_update(request, assessment_id):
+    teacher_id = request.user.id
+    try:
+        assessment = Assessment.objects.get(id=assessment_id, deleted_at__isnull=True)
+    except Assessment.DoesNotExist:
+        return JsonResponse({"detail": "Assessment not found"}, status=404)
+
+    if not _is_lecturer_for_module(teacher_id, assessment.module_id):
+        return JsonResponse({"detail": "Only the lecturer can update assessment status"}, status=403)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"detail": "Invalid JSON body"}, status=400)
+
+    status_label = payload.get("status")
+    if status_label not in {"Draft", "Scheduled", "Active", "Closed", "Published"}:
+        return JsonResponse(
+            {"detail": "Invalid status. Use Draft, Scheduled, Active, Closed, or Published."},
+            status=400,
+        )
+
+    assessment.status = ASSESSMENT_STATUS_TO_DB[status_label]
+    assessment.updated_at = timezone.now()
+    assessment.save(update_fields=["status", "updated_at"])
+    return JsonResponse(
+        {"assessment": _serialize_assessment(assessment, can_modify_status=True)}
+    )
+
+
+@login_required
+@user_passes_test(is_teacher)
+@require_GET
+def teacher_assessment_submissions(request, assessment_id):
+    teacher_id = request.user.id
+
+    try:
+        assessment = Assessment.objects.select_related("module").get(
+            id=assessment_id, deleted_at__isnull=True
+        )
+    except Assessment.DoesNotExist:
+        return JsonResponse({"detail": "Assessment not found"}, status=404)
+
+    module_ids = _teacher_module_ids(teacher_id)
+    if assessment.module_id not in module_ids and assessment.created_by_id != teacher_id:
+        return JsonResponse({"detail": "Not allowed for this assessment"}, status=403)
+
+    if assessment.status != ASSESSMENT_STATUS_TO_DB["Published"]:
+        return JsonResponse(
+            {"detail": "Submissions are only available after the assessment is published."},
+            status=409,
+        )
+
+    enrollment_rows = list(
+        StudentGroup.objects.filter(group__module_id=assessment.module_id)
+        .select_related("student", "group")
+        .order_by("student__last_name", "student__first_name", "student_id")
+    )
+    student_ids = [row.student_id for row in enrollment_rows]
+
+    latest_submission_by_student = {}
+    submission_stats_by_id = {}
+    if student_ids:
+        try:
+            placeholders = ", ".join(["%s"] * len(student_ids))
+            submission_query = f"""
+                SELECT id, student_id, submitted_at
+                FROM submission
+                WHERE assessment_id = %s
+                  AND student_id IN ({placeholders})
+                ORDER BY submitted_at DESC NULLS LAST, id DESC
+            """
+            with connection.cursor() as cursor:
+                cursor.execute(submission_query, [assessment.id, *student_ids])
+                for submission_id, student_id, submitted_at in cursor.fetchall():
+                    if student_id not in latest_submission_by_student:
+                        latest_submission_by_student[student_id] = {
+                            "id": submission_id,
+                            "submitted_at": submitted_at,
+                        }
+
+            submission_ids = [item["id"] for item in latest_submission_by_student.values()]
+            if submission_ids:
+                stat_placeholders = ", ".join(["%s"] * len(submission_ids))
+                stats_query = f"""
+                    SELECT
+                        submission_id,
+                        COUNT(*) AS answer_count,
+                        COUNT(score) AS scored_count,
+                        SUM(score) AS total_score
+                    FROM answer_submission
+                    WHERE submission_id IN ({stat_placeholders})
+                    GROUP BY submission_id
+                """
+                with connection.cursor() as cursor:
+                    cursor.execute(stats_query, submission_ids)
+                    for submission_id, answer_count, scored_count, total_score in cursor.fetchall():
+                        submission_stats_by_id[submission_id] = {
+                            "answer_count": int(answer_count or 0),
+                            "scored_count": int(scored_count or 0),
+                            "total_score": to_float(total_score) if total_score is not None else None,
+                        }
+        except Exception:
+            # Keep endpoint resilient across partially migrated schemas.
+            latest_submission_by_student = {}
+            submission_stats_by_id = {}
+
+    # Fallback for environments where attempts data exists but submission tables are incomplete.
+    attempts = list(
+        Attempt.objects.filter(assessment_id=assessment.id, student_id__in=student_ids).order_by(
+            "-attempt_number", "-id"
+        )
+    )
+    latest_attempt_by_student = {}
+    for attempt in attempts:
+        if attempt.student_id not in latest_attempt_by_student:
+            latest_attempt_by_student[attempt.student_id] = attempt
+
+    points_total = sum(
+        to_float(points)
+        for points in AssessmentQuestion.objects.filter(assessment_id=assessment.id).values_list(
+            "points", flat=True
+        )
+    )
+
+    rows = []
+    for row in enrollment_rows:
+        submission = latest_submission_by_student.get(row.student_id)
+        attempt = latest_attempt_by_student.get(row.student_id)
+        if submission is None and attempt is None:
+            rows.append(
+                {
+                    "submissionId": f"pending-{assessment.id}-{row.student_id}",
+                    "studentId": str(row.student_id),
+                    "studentName": f"{row.student.first_name} {row.student.last_name}".strip(),
+                    "studentEmail": row.student.email,
+                    "group": row.group.name if row.group_id else None,
+                    "status": "Not Started",
+                    "score": None,
+                    "maxScore": points_total,
+                    "submittedAt": None,
+                }
+            )
+            continue
+
+        if submission is not None:
+            stats = submission_stats_by_id.get(submission["id"], {})
+            answer_count = stats.get("answer_count", 0)
+            scored_count = stats.get("scored_count", 0)
+            status = "Graded" if answer_count > 0 and scored_count == answer_count else "Submitted"
+            rows.append(
+                {
+                    "submissionId": str(submission["id"]),
+                    "studentId": str(row.student_id),
+                    "studentName": f"{row.student.first_name} {row.student.last_name}".strip(),
+                    "studentEmail": row.student.email,
+                    "group": row.group.name if row.group_id else None,
+                    "status": status,
+                    "score": stats.get("total_score"),
+                    "maxScore": points_total,
+                    "submittedAt": submission["submitted_at"].isoformat() if submission["submitted_at"] else None,
+                }
+            )
+            continue
+
+        rows.append(
+            {
+                "submissionId": str(attempt.id),
+                "studentId": str(row.student_id),
+                "studentName": f"{row.student.first_name} {row.student.last_name}".strip(),
+                "studentEmail": row.student.email,
+                "group": row.group.name if row.group_id else None,
+                "status": attempt_status(attempt.status),
+                "score": to_float(attempt.score) if attempt.score is not None else None,
+                "maxScore": points_total,
+                "submittedAt": attempt.submitted_at.isoformat() if attempt.submitted_at else None,
+            }
+        )
+
+    return JsonResponse(
+        {
+            "assessment": {
+                "id": str(assessment.id),
+                "title": assessment.title,
+                "moduleId": str(assessment.module_id),
+                "moduleCode": assessment.module.code,
+            },
+            "rows": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+@user_passes_test(is_teacher)
+@require_http_methods(["GET", "PATCH"])
+def teacher_submission_detail(request, submission_id):
+    teacher_id = request.user.id
+
+    attempt = Attempt.objects.filter(id=submission_id).select_related("assessment__module", "student").first()
+    if attempt:
+        assessment = attempt.assessment
+    else:
+        assessment = None
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT s.student_id, s.assessment_id, s.submitted_at, a.title, a.module_id
+                    FROM submission s
+                    JOIN assessments a ON a.id = s.assessment_id
+                    WHERE s.id = %s
+                    """,
+                    [submission_id],
+                )
+                row = cursor.fetchone()
+                if row:
+                    student_id, assessment_id, submitted_at, title, module_id = row
+                    assessment = Assessment.objects.select_related("module").filter(id=assessment_id).first()
+                    attempt = type(
+                        "SubmissionProxy",
+                        (),
+                        {
+                            "id": int(submission_id),
+                            "student_id": student_id,
+                            "submitted_at": submitted_at,
+                            "assessment": assessment,
+                            "score": None,
+                            "status": "SUBMITTED",
+                            "student": User.objects.filter(id=student_id).first(),
+                        },
+                    )()
+        except Exception:
+            assessment = None
+
+    if not attempt or not assessment:
+        return JsonResponse({"detail": "Submission not found"}, status=404)
+
+    module_ids = _teacher_module_ids(teacher_id)
+    if assessment.module_id not in module_ids and assessment.created_by_id != teacher_id:
+        return JsonResponse({"detail": "Not allowed for this submission"}, status=403)
+
+    if request.method == "GET":
+        answer_rows = list(
+            Answer.objects.filter(attempt_id=getattr(attempt, "id", 0))
+            .select_related("question")
+            .order_by("id")
+        )
+
+        if answer_rows:
+            points_by_question = {
+                row.question_id: to_float(row.points)
+                for row in AssessmentQuestion.objects.filter(assessment_id=assessment.id)
+            }
+            keywords_by_question_id = defaultdict(list)
+            for keyword in QuestionKeyword.objects.filter(
+                question_id__in=[row.question_id for row in answer_rows],
+                is_active=True,
+            ).order_by("id"):
+                keywords_by_question_id[keyword.question_id].append(
+                    {"text": keyword.keyword, "weight": to_float(keyword.weight)}
+                )
+            feedback_by_answer = {
+                item.answer_id: item
+                for item in Feedback.objects.filter(answer_id__in=[a.id for a in answer_rows])
+            }
+            analysis_by_answer = defaultdict(lambda: {"detected": [], "missing": []})
+            analysis_rows = (
+                AnswerKeywordAnalysis.objects.filter(answer_id__in=[a.id for a in answer_rows])
+                .select_related("question_keyword")
+                .order_by("id")
+            )
+            for analysis in analysis_rows:
+                keyword_text = (
+                    analysis.keyword_snapshot
+                    or (analysis.question_keyword.keyword if analysis.question_keyword_id else None)
+                )
+                if not keyword_text:
+                    continue
+                if analysis.is_detected:
+                    analysis_by_answer[analysis.answer_id]["detected"].append(keyword_text)
+                else:
+                    analysis_by_answer[analysis.answer_id]["missing"].append(keyword_text)
+
+            answers_payload = []
+            for row in answer_rows:
+                detected_keywords = analysis_by_answer[row.id]["detected"]
+                missing_keywords = analysis_by_answer[row.id]["missing"]
+
+                if row.question.type == "DESCRIPTIVE" and keywords_by_question_id.get(row.question_id):
+                    try:
+                        ai_url = (
+                            getattr(settings, "AI_SERVICE_URL", "http://127.0.0.1:5000/api/ai/generate")
+                            .replace("/generate", "/evaluate")
+                        )
+                        ai_request = urllib.request.Request(
+                            ai_url,
+                            data=json.dumps(
+                                {
+                                    "answer_text": row.text_answer or "",
+                                    "keywords": keywords_by_question_id[row.question_id],
+                                    "max_points": points_by_question.get(row.question_id, 1.0),
+                                }
+                            ).encode("utf-8"),
+                            method="POST",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(ai_request, timeout=60) as ai_response:
+                            ai_raw = ai_response.read().decode("utf-8")
+                            ai_payload = json.loads(ai_raw) if ai_raw else {}
+                        ai_score = to_float(ai_payload.get("score", row.auto_score or 0))
+                        detected_keywords = ai_payload.get("detected_keywords") or detected_keywords
+                        missing_keywords = ai_payload.get("missing_keywords") or missing_keywords
+
+                        row.auto_score = ai_score
+                        row.updated_at = timezone.now()
+                        row.save(update_fields=["auto_score", "updated_at"])
+                    except Exception:
+                        ai_score = to_float(row.auto_score) if row.auto_score is not None else 0.0
+                    else:
+                        ai_analysis = []
+                        for kw in detected_keywords:
+                            keyword_obj = QuestionKeyword.objects.filter(
+                                question_id=row.question_id,
+                                keyword=kw,
+                            ).first()
+                            if keyword_obj:
+                                ai_analysis.append((keyword_obj.id, True, kw))
+                        for kw in missing_keywords:
+                            keyword_obj = QuestionKeyword.objects.filter(
+                                question_id=row.question_id,
+                                keyword=kw,
+                            ).first()
+                            if keyword_obj:
+                                ai_analysis.append((keyword_obj.id, False, kw))
+                        if ai_analysis:
+                            AnswerKeywordAnalysis.objects.filter(answer_id=row.id).delete()
+                            for keyword_id, is_detected, keyword_snapshot in ai_analysis:
+                                AnswerKeywordAnalysis.objects.create(
+                                    answer_id=row.id,
+                                    question_keyword_id=keyword_id,
+                                    keyword_snapshot=keyword_snapshot,
+                                    is_detected=is_detected,
+                                    confidence=None,
+                                    created_at=timezone.now(),
+                                )
+                else:
+                    ai_score = to_float(row.auto_score) if row.auto_score is not None else 0.0
+
+                current_score = row.final_score if row.final_score is not None else row.manual_score
+                if current_score is None:
+                    current_score = ai_score
+                answers_payload.append(
+                    {
+                        "questionId": str(row.question_id),
+                        "questionText": row.question.content,
+                        "questionType": row.question.type,
+                        "points": points_by_question.get(row.question_id, 0.0),
+                        "answer": row.text_answer or "",
+                        "autoScore": ai_score,
+                        "currentScore": to_float(current_score) if current_score is not None else 0.0,
+                        "isCorrect": bool(row.is_correct) if row.is_correct is not None else None,
+                        "detectedKeywords": detected_keywords,
+                        "missingKeywords": missing_keywords,
+                        "teacherComment": feedback_by_answer.get(row.id).teacher_comment
+                        if feedback_by_answer.get(row.id)
+                        else None,
+                    }
+                )
+            max_score = sum(points_by_question.values()) or to_float(assessment.total_points)
+            computed_submission_score = round(
+                sum(to_float(item["currentScore"]) for item in answers_payload),
+                2,
+            )
+            if to_float(attempt.score) != computed_submission_score:
+                attempt.score = computed_submission_score
+                attempt.updated_at = timezone.now()
+                attempt.save(update_fields=["score", "updated_at"])
+            return JsonResponse(
+                {
+                    "assessment": {
+                        "id": str(assessment.id),
+                        "title": assessment.title,
+                        "moduleId": str(assessment.module_id),
+                        "moduleCode": assessment.module.code,
+                    },
+                    "student": {
+                        "id": str(attempt.student_id),
+                        "name": f"{attempt.student.first_name} {attempt.student.last_name}".strip()
+                        if attempt.student
+                        else "Student",
+                    },
+                    "submission": {
+                        "id": str(attempt.id),
+                        "status": attempt_status(getattr(attempt, "status", "SUBMITTED")),
+                        "score": computed_submission_score,
+                        "maxScore": max_score,
+                        "submittedAt": attempt.submitted_at.isoformat() if attempt.submitted_at else None,
+                        "feedback": next(
+                            (item["teacherComment"] for item in answers_payload if item["teacherComment"]),
+                            "",
+                        ),
+                        "answers": answers_payload,
+                    },
+                }
+            )
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT aq.id, aq.question_id, q.content, q.type, aq.points, ans.answer_text, ans.selected_option, ans.score
+                    FROM answer_submission ans
+                    JOIN assessment_questions aq ON aq.id = ans.assessment_question_id
+                    JOIN questions q ON q.id = aq.question_id
+                    WHERE ans.submission_id = %s
+                    ORDER BY aq.sort_order, aq.id
+                    """,
+                    [submission_id],
+                )
+                rows = cursor.fetchall()
+        except Exception:
+            rows = []
+
+        answers_payload = [
+            {
+                "questionId": str(question_id),
+                "questionText": question_text,
+                "questionType": question_type,
+                "points": to_float(points),
+                "answer": answer_text or selected_option or "",
+                "autoScore": to_float(score) if score is not None else 0.0,
+                "currentScore": to_float(score) if score is not None else 0.0,
+                "isCorrect": None,
+                "detectedKeywords": [],
+                "missingKeywords": [],
+                "teacherComment": None,
+            }
+            for _, question_id, question_text, question_type, points, answer_text, selected_option, score in rows
+        ]
+        max_score = sum(to_float(item["points"]) for item in answers_payload) or to_float(assessment.total_points)
+        return JsonResponse(
+            {
+                "assessment": {
+                    "id": str(assessment.id),
+                    "title": assessment.title,
+                    "moduleId": str(assessment.module_id),
+                    "moduleCode": assessment.module.code,
+                },
+                "student": {
+                    "id": str(attempt.student_id),
+                    "name": f"{attempt.student.first_name} {attempt.student.last_name}".strip()
+                    if attempt.student
+                    else "Student",
+                },
+                "submission": {
+                    "id": str(attempt.id),
+                    "status": "Submitted",
+                    "score": round(sum(to_float(item["autoScore"]) for item in answers_payload), 2)
+                    if answers_payload
+                    else None,
+                    "maxScore": max_score,
+                    "submittedAt": attempt.submitted_at.isoformat() if attempt.submitted_at else None,
+                    "feedback": "",
+                    "answers": answers_payload,
+                },
+            }
+        )
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"detail": "Invalid JSON body"}, status=400)
+
+    scores = payload.get("scores") or {}
+    feedback_text = (payload.get("feedback") or "").strip()
+    question_feedback = payload.get("questionFeedback") or {}
+    action = (payload.get("action") or "save").strip().lower()
+    now = timezone.now()
+
+    answer_rows = list(Answer.objects.filter(attempt_id=getattr(attempt, "id", 0)).order_by("id"))
+    if answer_rows:
+        for answer in answer_rows:
+            score_raw = scores.get(str(answer.question_id))
+            if score_raw is None:
+                update_fields = []
+            else:
+                try:
+                    parsed_score = float(score_raw)
+                except (TypeError, ValueError):
+                    parsed_score = None
+                update_fields = []
+                if parsed_score is not None:
+                    answer.manual_score = parsed_score
+                    answer.final_score = parsed_score
+                    update_fields.extend(["manual_score", "final_score"])
+
+            answer_comment = str(question_feedback.get(str(answer.question_id), "")).strip()
+            existing_feedback = Feedback.objects.filter(answer_id=answer.id).first()
+            if answer_comment:
+                Feedback.objects.update_or_create(
+                    answer_id=answer.id,
+                    defaults={
+                        "teacher_comment": answer_comment,
+                        "graded_by_id": teacher_id,
+                        "graded_at": now,
+                        "private_note": None,
+                        "created_at": existing_feedback.created_at if existing_feedback else now,
+                        "updated_at": now,
+                    },
+                )
+            elif existing_feedback and str(existing_feedback.teacher_comment or "").strip():
+                existing_feedback.teacher_comment = ""
+                existing_feedback.graded_by_id = teacher_id
+                existing_feedback.graded_at = now
+                existing_feedback.updated_at = now
+                existing_feedback.save(
+                    update_fields=["teacher_comment", "graded_by_id", "graded_at", "updated_at"]
+                )
+
+            answer.updated_at = now
+            update_fields.append("updated_at")
+            answer.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        total_score = sum(
+            to_float(answer.final_score if answer.final_score is not None else answer.auto_score)
+            for answer in answer_rows
+        )
+        attempt.score = total_score
+        attempt.status = "FINALIZED" if action == "publish" else "MANUALLY_GRADED"
+        attempt.updated_at = now
+        if action == "publish" and not attempt.submitted_at:
+            attempt.submitted_at = now
+        attempt.save(update_fields=["score", "status", "updated_at", "submitted_at"])
+
+        if feedback_text and not question_feedback:
+            first_answer = answer_rows[0]
+            Feedback.objects.update_or_create(
+                answer_id=first_answer.id,
+                defaults={
+                    "teacher_comment": feedback_text,
+                    "graded_by_id": teacher_id,
+                    "graded_at": now,
+                    "private_note": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+    else:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT aq.id, aq.question_id
+                    FROM answer_submission ans
+                    JOIN assessment_questions aq ON aq.id = ans.assessment_question_id
+                    WHERE ans.submission_id = %s
+                    """,
+                    [submission_id],
+                )
+                mapping = cursor.fetchall()
+            mapping_by_question = {str(question_id): assessment_question_id for assessment_question_id, question_id in mapping}
+            with connection.cursor() as cursor:
+                for question_id, value in scores.items():
+                    assessment_question_id = mapping_by_question.get(str(question_id))
+                    if assessment_question_id is None:
+                        continue
+                    try:
+                        parsed_score = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    cursor.execute(
+                        """
+                        UPDATE answer_submission
+                        SET score = %s
+                        WHERE submission_id = %s AND assessment_question_id = %s
+                        """,
+                        [parsed_score, submission_id, assessment_question_id],
+                    )
+        except Exception:
+            pass
+
+    return JsonResponse({"saved": True})
 
 
 @csrf_exempt

@@ -1,43 +1,109 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { Plus, Calendar, Clock, Search } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { StatusBadge } from "../../components/StatusBadge";
-import { assessments, modules, submissions, getCurrentUser } from "../../mockData";
 import { Badge } from "../../components/ui/badge";
-import { canPublishAssessment } from "../../permissions";
+import { useAuth } from "../../contexts/AuthContext";
+import { apiGet, apiPatch } from "../../apiClient";
+import { toast } from "sonner";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../../components/ui/alert-dialog";
 
 export default function TeacherAssessments() {
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
-  const [assessmentList, setAssessmentList] = useState(
-    assessments.filter((a) => a.createdBy === currentUser.id)
-  );
+  const [isLoadingAssessments, setIsLoadingAssessments] = useState(true);
+  const [pendingPublishAssessment, setPendingPublishAssessment] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [assessmentList, setAssessmentList] = useState<
+    Array<{
+      id: string;
+      title: string;
+      moduleId: string;
+      moduleCode?: string;
+      duration: number;
+      startTime: string | null;
+      status: "Draft" | "Scheduled" | "Active" | "Closed" | "Published";
+      questions: string[];
+      canModifyStatus?: boolean;
+    }>
+  >([]);
 
   const filteredAssessments = assessmentList.filter((assessment) =>
     assessment.title.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const getSubmissionCount = (assessmentId: string) => {
-    return submissions.filter((s) => s.assessmentId === assessmentId).length;
-  };
+  useEffect(() => {
+    if (!user) return;
+    setIsLoadingAssessments(true);
+    apiGet<{
+      assessments: Array<{
+        id: string;
+        title: string;
+        moduleId: string;
+        moduleCode?: string;
+        duration: number;
+        startTime: string | null;
+        status: "Draft" | "Scheduled" | "Active" | "Closed" | "Published";
+        questions: string[];
+        canModifyStatus?: boolean;
+      }>;
+    }>("teacher/assessments")
+      .then((data) => setAssessmentList(data.assessments))
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Failed to load assessments");
+        setAssessmentList([]);
+      })
+      .finally(() => setIsLoadingAssessments(false));
+  }, [user]);
 
-  const handleTogglePublish = (assessmentId: string) => {
-    setAssessmentList((prev) =>
-      prev.map((a) =>
-        a.id === assessmentId
-          ? {
-              ...a,
-              // Simple toggle between Draft and Published for demo purposes
-              status: a.status === "Published" ? "Draft" : "Published",
-            }
-          : a
-      )
-    );
-    // TODO: Integrate with backend endpoint for publishing/unpublishing assessments
+  if (!user) {
+    return <div className="p-8">Loading...</div>;
+  }
+
+  const handleStatusChange = async (
+    assessmentId: string,
+    status: "Draft" | "Scheduled" | "Active" | "Closed" | "Published"
+  ) => {
+    try {
+      const response = await apiPatch<{
+        assessment: {
+          id: string;
+          status: "Draft" | "Scheduled" | "Active" | "Closed" | "Published";
+          canModifyStatus?: boolean;
+        };
+      }>(`teacher/assessments/${assessmentId}/status`, { status });
+
+      setAssessmentList((prev) =>
+        prev.map((assessment) =>
+          assessment.id === assessmentId
+            ? {
+                ...assessment,
+                status: response.assessment.status,
+                canModifyStatus: response.assessment.canModifyStatus,
+              }
+            : assessment
+        )
+      );
+      toast.success(`Assessment status set to ${status}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update assessment status");
+    }
   };
 
   return (
@@ -67,23 +133,54 @@ export default function TeacherAssessments() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {filteredAssessments.map((assessment) => {
-          const module = modules.find((m) => m.id === assessment.moduleId);
-          const submissionCount = getSubmissionCount(assessment.id);
-          const canPublish = canPublishAssessment(currentUser, assessment.moduleId);
-          
           return (
             <Card
               key={assessment.id}
-              className="hover:shadow-md transition-shadow cursor-pointer"
-              onClick={() => navigate(`/teacher/assessments/${assessment.id}/submissions`)}
+              className="hover:shadow-md transition-shadow"
             >
               <CardHeader>
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <CardTitle className="text-lg mb-2">{assessment.title}</CardTitle>
-                    <Badge variant="outline">{module?.code}</Badge>
+                    <Badge variant="outline">{assessment.moduleCode || assessment.moduleId}</Badge>
                   </div>
-                  <StatusBadge status={assessment.status} />
+                  <div className="flex flex-col items-end gap-2">
+                    <StatusBadge status={assessment.status} />
+                    {assessment.canModifyStatus && (
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <Select
+                          value={assessment.status}
+                          onValueChange={(value) => {
+                            const nextStatus = value as
+                              | "Draft"
+                              | "Scheduled"
+                              | "Active"
+                              | "Closed"
+                              | "Published";
+                            if (nextStatus === "Published") {
+                              setPendingPublishAssessment({
+                                id: assessment.id,
+                                title: assessment.title,
+                              });
+                              return;
+                            }
+                            handleStatusChange(assessment.id, nextStatus);
+                          }}
+                        >
+                          <SelectTrigger className="h-8 text-xs w-[150px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="Draft">Draft</SelectItem>
+                            <SelectItem value="Scheduled">Scheduled</SelectItem>
+                            <SelectItem value="Active">Active</SelectItem>
+                            <SelectItem value="Closed">Closed</SelectItem>
+                            <SelectItem value="Published">Published</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
@@ -91,8 +188,11 @@ export default function TeacherAssessments() {
                   <div className="flex items-center gap-2 text-gray-600">
                     <Calendar className="h-4 w-4" />
                     <span>
-                      {new Date(assessment.startTime).toLocaleDateString()} •{" "}
-                      {new Date(assessment.startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      {assessment.startTime
+                        ? `${new Date(assessment.startTime).toLocaleDateString()} • ${new Date(
+                            assessment.startTime
+                          ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                        : "Not scheduled"}
                     </span>
                   </div>
                   <div className="flex items-center gap-2 text-gray-600">
@@ -104,9 +204,7 @@ export default function TeacherAssessments() {
                       {assessment.questions.length} {assessment.questions.length === 1 ? "question" : "questions"}
                     </span>
                     <span className="text-gray-400">•</span>
-                    <span className="font-medium">
-                      {submissionCount} {submissionCount === 1 ? "submission" : "submissions"}
-                    </span>
+                    <span className="font-medium">Track submissions</span>
                   </div>
                 </div>
                 
@@ -134,20 +232,9 @@ export default function TeacherAssessments() {
                   </Button>
                   </div>
                   <div className="flex flex-col items-start gap-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!canPublish}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleTogglePublish(assessment.id);
-                      }}
-                    >
-                      {assessment.status === "Published" ? "Unpublish Results" : "Publish Results"}
-                    </Button>
-                    {!canPublish && (
+                    {!assessment.canModifyStatus && (
                       <p className="text-xs text-gray-500">
-                        Only the module Lecturer can publish or unpublish results.
+                        Only the module Lecturer can modify assessment status.
                       </p>
                     )}
                   </div>
@@ -158,7 +245,15 @@ export default function TeacherAssessments() {
         })}
       </div>
 
-      {filteredAssessments.length === 0 && (
+      {isLoadingAssessments && (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="text-gray-500">Loading assessments...</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {!isLoadingAssessments && filteredAssessments.length === 0 && (
         <Card>
           <CardContent className="py-12 text-center">
             <p className="text-gray-500 mb-4">No assessments found</p>
@@ -168,6 +263,37 @@ export default function TeacherAssessments() {
           </CardContent>
         </Card>
       )}
+
+      <AlertDialog
+        open={!!pendingPublishAssessment}
+        onOpenChange={(open) => {
+          if (!open) setPendingPublishAssessment(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Publish assessment?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You are about to publish{" "}
+              <span className="font-medium">{pendingPublishAssessment?.title}</span>. This is a
+              critical action and students may immediately see results based on your settings.
+              Continue only if this assessment is ready.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!pendingPublishAssessment) return;
+                handleStatusChange(pendingPublishAssessment.id, "Published");
+                setPendingPublishAssessment(null);
+              }}
+            >
+              Yes, publish
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

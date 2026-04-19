@@ -16,6 +16,8 @@ class Assessment(models.Model):
     status = models.CharField(max_length=30)
     shuffle_questions = models.BooleanField()
     shuffle_choices = models.BooleanField()
+    auto_submit = models.BooleanField()
+    tab_warning = models.BooleanField()
     max_attempts = models.IntegerField()
     show_result_immediately = models.BooleanField()
     allow_review = models.BooleanField()

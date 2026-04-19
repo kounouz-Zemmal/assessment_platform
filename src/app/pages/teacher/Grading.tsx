@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { ArrowLeft, Check, X } from "lucide-react";
 import { Button } from "../../components/ui/button";
@@ -7,40 +7,220 @@ import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { Label } from "../../components/ui/label";
 import { Badge } from "../../components/ui/badge";
-import { submissions, questions, assessments, users, getCurrentUser } from "../../mockData";
-import { canFinalizeGrades } from "../../permissions";
 import { toast } from "sonner";
+import { apiGet, apiPatch } from "../../apiClient";
 
 export default function TeacherGrading() {
   const { submissionId } = useParams();
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
-  
-  const submission = submissions.find((s) => s.id === submissionId);
-  const assessment = submission ? assessments.find((a) => a.id === submission.assessmentId) : null;
-  const student = submission ? users.find((u) => u.id === submission.studentId) : null;
-
+  const [loading, setLoading] = useState(true);
+  const [assessment, setAssessment] = useState<{ id: string; title: string; moduleId: string } | null>(null);
+  const [student, setStudent] = useState<{ id: string; name: string } | null>(null);
+  const [submission, setSubmission] = useState<{
+    id: string;
+    status: string;
+    score: number | null;
+    maxScore: number;
+    submittedAt: string | null;
+    feedback: string;
+    answers: Array<{
+      questionId: string;
+      questionText: string;
+      questionType: string;
+      points: number;
+      answer: string;
+      autoScore: number;
+      currentScore?: number;
+      isCorrect?: boolean | null;
+      teacherComment?: string | null;
+      detectedKeywords: string[];
+      missingKeywords: string[];
+    }>;
+  } | null>(null);
   const [scores, setScores] = useState<Record<string, number>>({});
-  const [feedback, setFeedback] = useState(submission?.feedback || "");
+  const [feedback, setFeedback] = useState("");
+  const [questionFeedback, setQuestionFeedback] = useState<Record<string, string>>({});
+  const [showQuestionFeedback, setShowQuestionFeedback] = useState<Record<string, boolean>>({});
+  const [approvedDescriptiveQuestions, setApprovedDescriptiveQuestions] = useState<Record<string, boolean>>({});
+  const [isEditing, setIsEditing] = useState(true);
+
+  useEffect(() => {
+    if (!submissionId) return;
+    setLoading(true);
+    apiGet<{
+      assessment: { id: string; title: string; moduleId: string };
+      student: { id: string; name: string };
+      submission: {
+        id: string;
+        status: string;
+        score: number | null;
+        maxScore: number;
+        submittedAt: string | null;
+        feedback: string;
+        answers: Array<{
+          questionId: string;
+          questionText: string;
+          questionType: string;
+          points: number;
+          answer: string;
+          autoScore: number;
+          currentScore?: number;
+          isCorrect?: boolean | null;
+          teacherComment?: string | null;
+          detectedKeywords: string[];
+          missingKeywords: string[];
+        }>;
+      };
+    }>(`teacher/submissions/${submissionId}`)
+      .then((data) => {
+        setAssessment(data.assessment);
+        setStudent(data.student);
+        setSubmission(data.submission);
+        setIsEditing(data.submission.status !== "Graded");
+        setFeedback(data.submission.feedback || "");
+        setScores(
+          data.submission.answers.reduce<Record<string, number>>((acc, item) => {
+            acc[item.questionId] = item.currentScore ?? item.autoScore ?? 0;
+            return acc;
+          }, {})
+        );
+        setApprovedDescriptiveQuestions(
+          data.submission.answers.reduce<Record<string, boolean>>((acc, item) => {
+            if (item.questionType === "DESCRIPTIVE" || item.questionType === "Descriptive") {
+              acc[item.questionId] = data.submission.status === "Graded";
+            }
+            return acc;
+          }, {})
+        );
+        setQuestionFeedback(
+          data.submission.answers.reduce<Record<string, string>>((acc, item) => {
+            acc[item.questionId] = item.teacherComment || "";
+            return acc;
+          }, {})
+        );
+        setShowQuestionFeedback(
+          data.submission.answers.reduce<Record<string, boolean>>((acc, item) => {
+            acc[item.questionId] = Boolean(item.teacherComment);
+            return acc;
+          }, {})
+        );
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Failed to load submission details");
+      })
+      .finally(() => setLoading(false));
+  }, [submissionId]);
+
+  const totalScore = useMemo(() => {
+    if (!submission) return 0;
+    return submission.answers.reduce((total, answer) => total + (scores[answer.questionId] ?? 0), 0);
+  }, [submission, scores]);
+
+  const descriptiveQuestionIds = useMemo(
+    () =>
+      (submission?.answers || [])
+        .filter((answer) => answer.questionType === "DESCRIPTIVE" || answer.questionType === "Descriptive")
+        .map((answer) => answer.questionId),
+    [submission]
+  );
+  const allDescriptiveApproved = descriptiveQuestionIds.every((questionId) => approvedDescriptiveQuestions[questionId]);
+  const canPublishGrade = allDescriptiveApproved;
+
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const renderHighlightedAnswer = (answerText: string, detectedKeywords: string[]) => {
+    if (!answerText) return "(No answer)";
+    const uniqueKeywords = Array.from(
+      new Set(
+        (detectedKeywords || [])
+          .map((keyword) => keyword.trim())
+          .filter((keyword) => keyword.length > 0)
+      )
+    ).sort((a, b) => b.length - a.length);
+
+    if (uniqueKeywords.length === 0) {
+      return answerText;
+    }
+
+    const pattern = new RegExp(`\\b(${uniqueKeywords.map(escapeRegExp).join("|")})\\b`, "gi");
+    const parts = answerText.split(pattern);
+
+    return parts.map((part, index) => {
+      const isKeyword = uniqueKeywords.some(
+        (keyword) => keyword.toLowerCase() === part.toLowerCase()
+      );
+      if (!isKeyword) return <span key={`${part}-${index}`}>{part}</span>;
+      return (
+        <span
+          key={`${part}-${index}`}
+          className="bg-emerald-100 text-emerald-800 px-1 rounded font-medium"
+        >
+          {part}
+        </span>
+      );
+    });
+  };
+
+  const handleScoreChange = (questionId: string, score: number, maxPoints: number) => {
+    const boundedScore = Number.isNaN(score) ? 0 : Math.max(0, Math.min(maxPoints, score));
+    setScores({ ...scores, [questionId]: boundedScore });
+  };
+
+  const handleApproveAiSuggestion = (questionId: string, aiScore: number, maxPoints: number) => {
+    const boundedScore = Number.isNaN(aiScore) ? 0 : Math.max(0, Math.min(maxPoints, aiScore));
+    setApprovedDescriptiveQuestions((prev) => ({
+      ...prev,
+      [questionId]: true,
+    }));
+    setScores((prev) => ({
+      ...prev,
+      [questionId]: boundedScore,
+    }));
+  };
+
+  const handleSaveGrade = async () => {
+    if (!submission) return;
+    try {
+      await apiPatch(`teacher/submissions/${submission.id}`, {
+        scores,
+        feedback,
+        questionFeedback,
+        action: "save",
+      });
+      toast.success("Grade saved successfully");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save grade");
+    }
+  };
+
+  const handlePublishGrade = async () => {
+    if (!submission || !assessment) return;
+    if (!allDescriptiveApproved) {
+      toast.error("Approve all AI-suggested descriptive scores before publishing");
+      return;
+    }
+    try {
+      await apiPatch(`teacher/submissions/${submission.id}`, {
+        scores,
+        feedback,
+        questionFeedback,
+        action: "publish",
+      });
+      toast.success("Grade published and student notified");
+      setIsEditing(false);
+      navigate(`/teacher/assessments/${assessment.id}/submissions`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to publish grade");
+    }
+  };
+
+  if (loading) {
+    return <div className="p-8">Loading...</div>;
+  }
 
   if (!submission || !assessment || !student) {
     return <div className="p-8">Submission not found</div>;
   }
-
-  const canFinalize = canFinalizeGrades(currentUser, assessment.moduleId);
-
-  const handleScoreChange = (questionId: string, score: number) => {
-    setScores({ ...scores, [questionId]: score });
-  };
-
-  const handleSaveGrade = () => {
-    toast.success("Grade saved successfully");
-  };
-
-  const handlePublishGrade = () => {
-    toast.success("Grade published and student notified");
-    navigate(`/teacher/assessments/${assessment.id}/submissions`);
-  };
 
   return (
     <div className="p-8">
@@ -81,51 +261,60 @@ export default function TeacherGrading() {
                 <p className="text-sm text-gray-500">Max Score</p>
                 <p className="font-medium">{submission.maxScore} points</p>
               </div>
+              <div>
+                <p className="text-sm text-gray-500">Current Total</p>
+                <p className="font-medium">
+                  {totalScore} / {submission.maxScore}
+                </p>
+              </div>
             </div>
           </CardContent>
         </Card>
 
         {/* Questions and Answers */}
         {submission.answers.map((answer, index) => {
-          const question = questions.find((q) => q.id === answer.questionId);
-          if (!question) return null;
-
-          const isDescriptive = question.type === "Descriptive";
-          const isAutoGraded = question.type === "MCQ" || question.type === "SCQ" || question.type === "True/False";
+          const questionType =
+            answer.questionType === "TRUE_FALSE"
+              ? "True/False"
+              : answer.questionType === "DESCRIPTIVE"
+              ? "Descriptive"
+              : answer.questionType;
+          const isDescriptive = questionType === "Descriptive";
+          const isAutoGraded = questionType === "MCQ" || questionType === "SCQ" || questionType === "True/False";
 
           return (
-            <Card key={question.id}>
+            <Card key={answer.questionId}>
               <CardHeader>
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
                       <Badge variant="outline">Question {index + 1}</Badge>
-                      <Badge variant="outline">{question.type}</Badge>
+                      <Badge variant="outline">{questionType}</Badge>
                       <span className="text-sm text-gray-500 ml-auto">
-                        {question.points} points
+                        {answer.points} points
                       </span>
                     </div>
-                    <CardTitle className="text-base">{question.text}</CardTitle>
+                    <CardTitle className="text-base">{answer.questionText}</CardTitle>
                   </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                {/* Correct Answer (for objective questions) */}
-                {isAutoGraded && (
-                  <div>
-                    <Label className="text-sm text-gray-500">Correct Answer</Label>
-                    <p className="font-medium text-green-600">{String(question.correctAnswer)}</p>
-                  </div>
-                )}
-
                 {/* Student Answer */}
                 <div>
                   <Label className="text-sm text-gray-500">Student Answer</Label>
-                  <p className="font-medium">{String(answer.answer) || "(No answer)"}</p>
+                  <p className="font-medium">
+                    {renderHighlightedAnswer(String(answer.answer || ""), answer.detectedKeywords)}
+                  </p>
+                  {isAutoGraded && answer.isCorrect === true && (
+                    <p className="text-sm font-medium text-green-600 mt-1">Correct answer</p>
+                  )}
+                  {isAutoGraded && answer.isCorrect === false && (
+                    <p className="text-sm font-medium text-red-600 mt-1">Incorrect answer</p>
+                  )}
                 </div>
 
                 {/* Descriptive Question Auto-Grading Analysis */}
-                {isDescriptive && answer.detectedKeywords && (
+                {isDescriptive && (
                   <div className="space-y-3 p-4 bg-blue-50 rounded-lg">
                     <div>
                       <Label className="text-sm font-semibold text-blue-900">
@@ -133,17 +322,19 @@ export default function TeacherGrading() {
                       </Label>
                     </div>
                     
-                    <div>
-                      <Label className="text-xs text-gray-600">Detected Keywords</Label>
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {answer.detectedKeywords.map((keyword, idx) => (
-                          <Badge key={idx} variant="default" className="bg-green-500 gap-1">
-                            <Check className="h-3 w-3" />
-                            {keyword}
-                          </Badge>
-                        ))}
+                    {answer.detectedKeywords && answer.detectedKeywords.length > 0 && (
+                      <div>
+                        <Label className="text-xs text-gray-600">Detected Keywords</Label>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {answer.detectedKeywords.map((keyword, idx) => (
+                            <Badge key={idx} variant="default" className="bg-green-500 gap-1">
+                              <Check className="h-3 w-3" />
+                              {keyword}
+                            </Badge>
+                          ))}
+                        </div>
                       </div>
-                    </div>
+                    )}
 
                     {answer.missingKeywords && answer.missingKeywords.length > 0 && (
                       <div>
@@ -161,42 +352,85 @@ export default function TeacherGrading() {
 
                     <div className="flex items-center gap-4 pt-2 border-t border-blue-200">
                       <div>
-                        <Label className="text-xs text-gray-600">Auto Score</Label>
+                        <Label className="text-xs text-gray-600">AI Suggested Score</Label>
                         <p className="text-lg font-bold text-blue-900">
-                          {answer.autoScore}/{question.points}
+                          {answer.autoScore}/{answer.points}
                         </p>
                       </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={approvedDescriptiveQuestions[answer.questionId] ? "default" : "outline"}
+                        disabled={!isEditing}
+                        onClick={() =>
+                          handleApproveAiSuggestion(
+                            answer.questionId,
+                            answer.autoScore ?? 0,
+                            answer.points
+                          )
+                        }
+                      >
+                        {approvedDescriptiveQuestions[answer.questionId]
+                          ? "Approved by Teacher"
+                          : "Approve AI Suggestion"}
+                      </Button>
                     </div>
-                  </div>
-                )}
-
-                {/* Reference Answer (for descriptive) */}
-                {isDescriptive && question.referenceAnswer && (
-                  <div>
-                    <Label className="text-sm text-gray-500">Reference Answer</Label>
-                    <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">
-                      {question.referenceAnswer}
-                    </p>
                   </div>
                 )}
 
                 {/* Score Input */}
                 <div>
-                  <Label htmlFor={`score-${question.id}`}>
+                  <Label htmlFor={`score-${answer.questionId}`}>
                     {isDescriptive ? "Final Score (adjust if needed)" : "Score"}
                   </Label>
                   <div className="flex items-center gap-2 mt-1">
                     <Input
-                      id={`score-${question.id}`}
+                      id={`score-${answer.questionId}`}
                       type="number"
                       min="0"
-                      max={question.points}
-                      defaultValue={isDescriptive ? answer.autoScore : undefined}
-                      onChange={(e) => handleScoreChange(question.id, parseFloat(e.target.value))}
+                      max={answer.points}
+                      value={scores[answer.questionId] ?? 0}
+                      placeholder={String(answer.autoScore ?? 0)}
+                      disabled={!isEditing}
+                      onChange={(e) =>
+                        handleScoreChange(answer.questionId, parseFloat(e.target.value), answer.points)
+                      }
                       className="w-24"
                     />
-                    <span className="text-sm text-gray-500">/ {question.points} points</span>
+                    <span className="text-sm text-gray-500">/ {answer.points} points</span>
                   </div>
+                </div>
+                <div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!isEditing}
+                    onClick={() =>
+                      setShowQuestionFeedback((prev) => ({
+                        ...prev,
+                        [answer.questionId]: !prev[answer.questionId],
+                      }))
+                    }
+                  >
+                    + Optional feedback
+                  </Button>
+                  {showQuestionFeedback[answer.questionId] && (
+                    <div className="mt-2">
+                      <Textarea
+                        value={questionFeedback[answer.questionId] || ""}
+                        disabled={!isEditing}
+                        onChange={(e) =>
+                          setQuestionFeedback((prev) => ({
+                            ...prev,
+                            [answer.questionId]: e.target.value,
+                          }))
+                        }
+                        placeholder="Write optional feedback for this question..."
+                        rows={2}
+                      />
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -206,11 +440,12 @@ export default function TeacherGrading() {
         {/* Overall Feedback */}
         <Card>
           <CardHeader>
-            <CardTitle>Overall Feedback</CardTitle>
+            <CardTitle>Overall Feedback (optional)</CardTitle>
           </CardHeader>
           <CardContent>
             <Textarea
               value={feedback}
+              disabled={!isEditing}
               onChange={(e) => setFeedback(e.target.value)}
               placeholder="Add comments or feedback for the student..."
               rows={4}
@@ -221,16 +456,24 @@ export default function TeacherGrading() {
         {/* Action Buttons */}
         <div className="flex flex-col items-end gap-2">
           <div className="flex gap-3">
-            <Button variant="outline" onClick={handleSaveGrade}>
-              Save Draft
-            </Button>
-            <Button onClick={handlePublishGrade} disabled={!canFinalize}>
-              Publish Grade & Notify Student
-            </Button>
+            {isEditing ? (
+              <>
+                <Button variant="outline" onClick={handleSaveGrade}>
+                  Save Draft
+                </Button>
+                <Button onClick={handlePublishGrade} disabled={!canPublishGrade}>
+                  Publish Grade & Notify Student
+                </Button>
+              </>
+            ) : (
+              <Button variant="outline" onClick={() => setIsEditing(true)}>
+                Edit
+              </Button>
+            )}
           </div>
-          {!canFinalize && (
-            <p className="text-xs text-gray-500">
-              Only the module Lecturer can finalize and publish grades. You can still review and save draft scores.
+          {!allDescriptiveApproved && (
+            <p className="text-xs text-amber-600">
+              Approve all descriptive AI suggestions before publishing.
             </p>
           )}
         </div>

@@ -1,7 +1,12 @@
 export type UserRole = "admin" | "teacher" | "student";
 export type TeachingRole = "LECTURER" | "LAB_TEACHER" | "TD_TEACHER" | "ASSISTANT";
 export type QuestionType = "MCQ" | "SCQ" | "True/False" | "Descriptive";
-export type AssessmentStatus = "Draft" | "Scheduled" | "Active" | "Closed" | "Published";
+export type AssessmentStatus =
+  | "Draft"
+  | "Scheduled"
+  | "Active"
+  | "Closed"
+  | "Published";
 export type SubmissionStatus = "Not Started" | "In Progress" | "Submitted" | "Graded";
 
 export interface AssessmentResultsVisibility {
