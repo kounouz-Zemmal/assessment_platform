@@ -164,3 +164,53 @@ def generate_ai_content(question: str, answer: bool, keywords: bool, improve: bo
         "answer": response_answer,
         "keywords": keyword_list,
     }
+
+
+def evaluate_answer_with_keywords(answer_text: str, keywords: list[dict], max_points: float) -> dict:
+    """
+    Evaluate a student descriptive answer against instructor-selected keywords.
+    Returns JSON-friendly payload:
+      { score, detected_keywords, missing_keywords }
+    """
+    if max_points <= 0:
+        max_points = 1.0
+
+    normalized_keywords: list[dict] = []
+    for item in keywords or []:
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        try:
+            weight = float(item.get("weight", 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        normalized_keywords.append({"text": text, "weight": max(0.1, weight)})
+
+    if not normalized_keywords:
+        return {"score": 0.0, "detected_keywords": [], "missing_keywords": []}
+
+    normalized_answer = f" {answer_text.lower()} "
+    detected_clean: list[str] = []
+    missing_clean: list[str] = []
+    detected_weight = 0.0
+    total_weight = sum(item["weight"] for item in normalized_keywords) or 1.0
+
+    for item in normalized_keywords:
+        keyword = item["text"]
+        keyword_lower = keyword.lower()
+        # Word-boundary based containment to avoid accidental partial matches.
+        pattern = r"\b" + re.escape(keyword_lower) + r"\b"
+        if re.search(pattern, normalized_answer):
+            detected_clean.append(keyword)
+            detected_weight += item["weight"]
+        else:
+            missing_clean.append(keyword)
+
+    score = max_points * (detected_weight / total_weight)
+    score = max(0.0, min(max_points, score))
+
+    return {
+        "score": score,
+        "detected_keywords": detected_clean,
+        "missing_keywords": missing_clean,
+    }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "../../components/ui/button";
@@ -8,34 +8,158 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/ca
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { Checkbox } from "../../components/ui/checkbox";
 import { Textarea } from "../../components/ui/textarea";
-import { modules, questions, assessments } from "../../mockData";
 import { Badge } from "../../components/ui/badge";
 import { toast } from "sonner";
+import { useAuth } from "../../contexts/AuthContext";
+import { apiGet, apiPatch, apiPost } from "../../apiClient";
 
 export default function TeacherCreateAssessment() {
   const navigate = useNavigate();
   const { id } = useParams();
   const isEditing = !!id;
+  const { user } = useAuth();
+
+  if (!user) {
+    return <div className="p-8">Loading...</div>;
+  }
   
-  const existingAssessment = id ? assessments.find((a) => a.id === id) : null;
+  const [isLoadingAssessment, setIsLoadingAssessment] = useState(isEditing);
+  const [teacherModules, setTeacherModules] = useState<
+    Array<{
+      id: string;
+      code: string;
+      name: string;
+      topics: Array<{ id: string; name: string; moduleId: string }>;
+    }>
+  >([]);
+  const [moduleQuestions, setModuleQuestions] = useState<
+    Array<{
+      id: string;
+      moduleId: string;
+      topicId: string;
+      type: string;
+      text: string;
+      points: number;
+      createdBy: string;
+    }>
+  >([]);
+  const assignedModuleIds = useMemo(
+    () => teacherModules.map((module) => String(module.id)),
+    [teacherModules]
+  );
 
   const [formData, setFormData] = useState({
-    title: existingAssessment?.title || "",
-    moduleId: existingAssessment?.moduleId || "",
-    duration: existingAssessment?.duration || 60,
-    startDate: existingAssessment ? new Date(existingAssessment.startTime).toISOString().split("T")[0] : "",
-    startTime: existingAssessment ? new Date(existingAssessment.startTime).toTimeString().slice(0, 5) : "",
-    endDate: existingAssessment ? new Date(existingAssessment.endTime).toISOString().split("T")[0] : "",
-    endTime: existingAssessment ? new Date(existingAssessment.endTime).toTimeString().slice(0, 5) : "",
-    selectedQuestions: existingAssessment?.questions || [],
-    randomize: existingAssessment?.randomize || false,
-    instructions: existingAssessment?.instructions || "",
-    shuffleAnswers: existingAssessment?.shuffleAnswers ?? true,
-    autoSubmitOnTimeout: existingAssessment?.autoSubmitOnTimeout ?? true,
-    tabSwitchWarning: existingAssessment?.tabSwitchWarning ?? false,
+    title: "",
+    moduleId: "",
+    duration: 60,
+    startDate: "",
+    startTime: "",
+    endDate: "",
+    endTime: "",
+    selectedQuestions: [] as string[],
+    randomize: false,
+    instructions: "",
+    shuffleAnswers: true,
+    autoSubmitOnTimeout: true,
+    tabSwitchWarning: false,
   });
 
-  const moduleQuestions = questions.filter((q) => q.moduleId === formData.moduleId);
+  useEffect(() => {
+    apiGet<{
+      modules: Array<{
+        id: string;
+        code: string;
+        name: string;
+        topics: Array<{ id: string; name: string; moduleId: string }>;
+      }>;
+    }>("teacher/modules")
+      .then((data) => setTeacherModules(data.modules))
+      .catch((error) => {
+        const message =
+          error instanceof Error ? error.message : "Failed to load assigned modules";
+        toast.error(message);
+        setTeacherModules([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!isEditing || !id) return;
+
+    setIsLoadingAssessment(true);
+    apiGet<{
+      assessment: {
+        id: string;
+        title: string;
+        moduleId: string;
+        duration: number;
+        startTime: string | null;
+        endTime: string | null;
+        questions: string[];
+        randomize: boolean;
+        instructions?: string;
+        shuffleAnswers?: boolean;
+        autoSubmitOnTimeout?: boolean;
+        tabSwitchWarning?: boolean;
+      };
+    }>(`teacher/assessments/${id}`)
+      .then((data) => {
+        const assessment = data.assessment;
+        setFormData({
+          title: assessment.title || "",
+          moduleId: assessment.moduleId || "",
+          duration: assessment.duration || 60,
+          startDate: assessment.startTime
+            ? new Date(assessment.startTime).toISOString().split("T")[0]
+            : "",
+          startTime: assessment.startTime
+            ? new Date(assessment.startTime).toTimeString().slice(0, 5)
+            : "",
+          endDate: assessment.endTime
+            ? new Date(assessment.endTime).toISOString().split("T")[0]
+            : "",
+          endTime: assessment.endTime
+            ? new Date(assessment.endTime).toTimeString().slice(0, 5)
+            : "",
+          selectedQuestions: assessment.questions || [],
+          randomize: assessment.randomize || false,
+          instructions: assessment.instructions || "",
+          shuffleAnswers: assessment.shuffleAnswers ?? true,
+          autoSubmitOnTimeout: assessment.autoSubmitOnTimeout ?? true,
+          tabSwitchWarning: assessment.tabSwitchWarning ?? false,
+        });
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Failed to load assessment");
+        navigate("/teacher/assessments");
+      })
+      .finally(() => setIsLoadingAssessment(false));
+  }, [isEditing, id, navigate]);
+
+  useEffect(() => {
+    if (!formData.moduleId) {
+      setModuleQuestions([]);
+      return;
+    }
+
+    apiGet<{
+      questions: Array<{
+        id: string;
+        moduleId: string;
+        topicId: string;
+        type: string;
+        text: string;
+        points: number;
+        createdBy: string;
+      }>;
+    }>("teacher/questions", { module_id: formData.moduleId, page: 1, page_size: 100 })
+      .then((data) => setModuleQuestions(data.questions))
+      .catch((error) => {
+        const message =
+          error instanceof Error ? error.message : "Failed to load module questions";
+        toast.error(message);
+        setModuleQuestions([]);
+      });
+  }, [formData.moduleId]);
 
   const toggleQuestion = (questionId: string) => {
     setFormData({
@@ -46,17 +170,68 @@ export default function TeacherCreateAssessment() {
     });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!assignedModuleIds.includes(formData.moduleId)) {
+      toast.error("You can only create assessments for modules assigned to you");
+      return;
+    }
     
     if (!formData.title || !formData.moduleId || formData.selectedQuestions.length === 0) {
       toast.error("Please fill in all required fields and select at least one question");
       return;
     }
 
-    toast.success(isEditing ? "Assessment updated successfully" : "Assessment created successfully");
-    navigate("/teacher/assessments");
+    const moduleQuestionIds = new Set(moduleQuestions.map((question) => question.id));
+    const hasQuestionOutsideModule = formData.selectedQuestions.some(
+      (questionId) => !moduleQuestionIds.has(questionId)
+    );
+    if (hasQuestionOutsideModule) {
+      toast.error("You can only include questions from the selected module");
+      return;
+    }
+
+    const startTimeIso =
+      formData.startDate && formData.startTime
+        ? new Date(`${formData.startDate}T${formData.startTime}`).toISOString()
+        : null;
+    const endTimeIso =
+      formData.endDate && formData.endTime
+        ? new Date(`${formData.endDate}T${formData.endTime}`).toISOString()
+        : null;
+
+    try {
+      const payload = {
+        title: formData.title.trim(),
+        moduleId: formData.moduleId,
+        duration: formData.duration,
+        startTime: startTimeIso,
+        endTime: endTimeIso,
+        selectedQuestions: formData.selectedQuestions,
+        randomize: formData.randomize,
+        instructions: formData.instructions,
+        shuffleAnswers: formData.shuffleAnswers,
+        autoSubmitOnTimeout: formData.autoSubmitOnTimeout,
+        tabSwitchWarning: formData.tabSwitchWarning,
+      };
+
+      if (isEditing && id) {
+        await apiPatch(`teacher/assessments/${id}`, payload);
+      } else {
+        await apiPost("teacher/assessments", payload);
+      }
+
+      toast.success(isEditing ? "Assessment updated successfully" : "Assessment created successfully");
+      navigate("/teacher/assessments");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save assessment");
+    }
   };
+
+  if (isLoadingAssessment) {
+    return <div className="p-8">Loading assessment...</div>;
+  }
 
   return (
     <div className="p-8">
@@ -105,13 +280,18 @@ export default function TeacherCreateAssessment() {
                   <SelectValue placeholder="Select module" />
                 </SelectTrigger>
                 <SelectContent>
-                  {modules.map((module) => (
+                  {teacherModules.map((module) => (
                     <SelectItem key={module.id} value={module.id}>
                       {module.code} - {module.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {teacherModules.length === 0 && (
+                <p className="text-xs text-amber-600">
+                  No modules are currently assigned to you.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -253,12 +433,12 @@ export default function TeacherCreateAssessment() {
               </p>
             ) : moduleQuestions.length === 0 ? (
               <p className="text-center text-gray-500 py-8">
-                No questions available for this module
+                No questions available for this module.
               </p>
             ) : (
               <div className="space-y-3 max-h-96 overflow-y-auto">
                 {moduleQuestions.map((question) => {
-                  const module = modules.find((m) => m.id === question.moduleId);
+                  const module = teacherModules.find((m) => m.id === question.moduleId);
                   const topic = module?.topics.find((t) => t.id === question.topicId);
                   
                   return (
