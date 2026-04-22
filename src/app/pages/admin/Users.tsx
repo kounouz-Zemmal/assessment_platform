@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Plus, Pencil, Trash2, Search, UserPlus, Upload } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -33,16 +33,16 @@ interface UsersResponse {
   };
 }
 
+type UserRoleFilter = "all" | "admin" | "teacher" | "student";
+const PAGE_SIZE = 20;
+const FETCH_PAGE_SIZE = 100;
+
 export default function AdminUsers() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [roleFilter, setRoleFilter] = useState<string>("all");
-  const [users, setUsers] = useState<User[]>([]);
-  const [pagination, setPagination] = useState({
-    page: 1,
-    pageSize: 20,
-    total: 0,
-    totalPages: 0,
-  });
+  const [activeSearchQuery, setActiveSearchQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState<UserRoleFilter>("all");
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isCsvDialogOpen, setIsCsvDialogOpen] = useState(false);
@@ -57,20 +57,31 @@ export default function AdminUsers() {
     role: "student" as 'admin' | 'teacher' | 'student',
   });
 
-  const loadUsers = async (page = 1, search = "", role = "") => {
+  const loadAllUsers = async () => {
     setLoading(true);
     try {
-      const params: any = { page, page_size: pagination.pageSize };
-      if (search) params.search = search;
-      if (role && role !== "all") params.role = role;
+      const loadedUsers: User[] = [];
+      let page = 1;
+      let totalPages = 1;
 
-      const response = await apiGet<UsersResponse>("admin/users", params);
-      const usersWithName = response.users.map(user => ({
-        ...user,
-        name: `${user.firstName} ${user.lastName}`.trim(),
-      }));
-      setUsers(usersWithName);
-      setPagination(response.pagination);
+      do {
+        const response = await apiGet<UsersResponse>("admin/users", {
+          page,
+          page_size: FETCH_PAGE_SIZE,
+        });
+
+        loadedUsers.push(
+          ...response.users.map((user) => ({
+            ...user,
+            name: `${user.firstName} ${user.lastName}`.trim(),
+          })),
+        );
+
+        totalPages = response.pagination.totalPages;
+        page += 1;
+      } while (page <= totalPages);
+
+      setAllUsers(loadedUsers);
     } catch (error) {
       toast.error("Failed to load users");
     } finally {
@@ -79,11 +90,47 @@ export default function AdminUsers() {
   };
 
   useEffect(() => {
-    loadUsers();
+    loadAllUsers();
   }, []);
 
+  const filteredUsers = useMemo(() => {
+    const normalizedSearch = activeSearchQuery.trim().toLowerCase();
+
+    return allUsers.filter((user) => {
+      const matchesRole =
+        roleFilter === "all" || user.role.toLowerCase() === roleFilter;
+
+      if (!matchesRole) return false;
+      if (!normalizedSearch) return true;
+
+      return (
+        user.firstName.toLowerCase().includes(normalizedSearch) ||
+        user.lastName.toLowerCase().includes(normalizedSearch) ||
+        user.email.toLowerCase().includes(normalizedSearch)
+      );
+    });
+  }, [allUsers, activeSearchQuery, roleFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / PAGE_SIZE));
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(page, totalPages));
+  }, [totalPages]);
+
+  const paginatedUsers = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filteredUsers.slice(start, start + PAGE_SIZE);
+  }, [filteredUsers, currentPage]);
+
   const handleSearch = () => {
-    loadUsers(1, searchQuery, roleFilter);
+    setActiveSearchQuery(searchQuery);
+    setCurrentPage(1);
+  };
+
+  const handleRoleFilterChange = (value: UserRoleFilter) => {
+    setRoleFilter(value);
+    setActiveSearchQuery(searchQuery);
+    setCurrentPage(1);
   };
 
   const handleCreateUser = async () => {
@@ -92,7 +139,7 @@ export default function AdminUsers() {
       toast.success("User created successfully");
       setIsCreateDialogOpen(false);
       resetForm();
-      loadUsers();
+      loadAllUsers();
     } catch (error) {
       toast.error("Failed to create user");
     }
@@ -102,7 +149,7 @@ export default function AdminUsers() {
     try {
       await apiDelete(`admin/users/${userId}/delete`);
       toast.success("User deleted successfully");
-      loadUsers();
+      loadAllUsers();
     } catch (error) {
       toast.error("Failed to delete user");
     }
@@ -130,7 +177,7 @@ export default function AdminUsers() {
         }
         setIsCsvDialogOpen(false);
         setSelectedFile(null);
-        loadUsers();
+        loadAllUsers();
       } else {
         toast.error(result.error || "Import failed");
       }
@@ -280,7 +327,7 @@ export default function AdminUsers() {
                 onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
               />
             </div>
-            <Select value={roleFilter} onValueChange={setRoleFilter}>
+            <Select value={roleFilter} onValueChange={handleRoleFilterChange}>
               <SelectTrigger className="w-40">
                 <SelectValue placeholder="Filter by role" />
               </SelectTrigger>
@@ -312,7 +359,7 @@ export default function AdminUsers() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {users.map((user) => (
+                  {paginatedUsers.map((user) => (
                     <TableRow key={user.id}>
                       <TableCell>{user.name}</TableCell>
                       <TableCell>{user.email}</TableCell>
@@ -358,23 +405,25 @@ export default function AdminUsers() {
 
               <div className="flex justify-between items-center mt-4">
                 <div className="text-sm text-gray-500">
-                  Showing {users.length} of {pagination.total} users
+                  Showing {paginatedUsers.length} of {filteredUsers.length} users
                 </div>
                 <div className="flex gap-2">
                   <Button
                     variant="outline"
-                    disabled={pagination.page <= 1}
-                    onClick={() => loadUsers(pagination.page - 1, searchQuery, roleFilter)}
+                    disabled={currentPage <= 1}
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
                   >
                     Previous
                   </Button>
                   <span className="px-3 py-2">
-                    Page {pagination.page} of {pagination.totalPages}
+                    Page {currentPage} of {totalPages}
                   </span>
                   <Button
                     variant="outline"
-                    disabled={pagination.page >= pagination.totalPages}
-                    onClick={() => loadUsers(pagination.page + 1, searchQuery, roleFilter)}
+                    disabled={currentPage >= totalPages}
+                    onClick={() =>
+                      setCurrentPage((page) => Math.min(totalPages, page + 1))
+                    }
                   >
                     Next
                   </Button>

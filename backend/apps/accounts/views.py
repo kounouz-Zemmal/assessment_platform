@@ -21,13 +21,13 @@ def is_admin(user):
 @require_GET
 def list_users(request):
     # Filtering
-    role_filter = request.GET.get('role')
+    role_filter = (request.GET.get("role") or "").strip()
     search = request.GET.get('search')
     is_active = request.GET.get('is_active')
 
     users = User.objects.select_related("role").filter(deleted_at__isnull=True)
 
-    if role_filter:
+    if role_filter and role_filter.lower() != "all":
         users = users.filter(role__name__iexact=role_filter)
     if search:
         users = users.filter(
