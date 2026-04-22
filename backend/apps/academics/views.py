@@ -7,7 +7,7 @@ from django.utils import timezone
 import json
 
 from apps.accounts.models import User, Role
-from apps.academics.models import Module, ModuleTeacher, Group, StudentGroup
+from apps.academics.models import Module, ModuleTeacher, Group, StudentGroup, Topic
 
 
 def is_admin(user):
@@ -39,6 +39,24 @@ def list_modules(request):
                 updated_at=timezone.now(),
             )
 
+            # Create topics if provided
+            topics_data = data.get("topics", [])
+            created_topics = []
+            for topic_data in topics_data:
+                topic_name = topic_data.get("name")
+                if topic_name:
+                    topic = Topic.objects.create(
+                        name=topic_name,
+                        module=module,
+                        is_active=True,
+                        created_at=timezone.now(),
+                        updated_at=timezone.now(),
+                    )
+                    created_topics.append({
+                        "id": topic.id,
+                        "name": topic.name
+                    })
+
             return JsonResponse({
                 "success": True,
                 "data": {
@@ -47,6 +65,7 @@ def list_modules(request):
                         "name": module.name,
                         "code": module.code,
                         "description": module.description,
+                        "topics": created_topics
                     }
                 }
             }, status=201)
@@ -56,11 +75,13 @@ def list_modules(request):
     modules = Module.objects.filter(is_active=True, deleted_at__isnull=True)
     data = []
     for module in modules:
+        topics = Topic.objects.filter(module=module, is_active=True)
         data.append({
             "id": module.id,
             "name": module.name,
             "code": module.code,
             "description": module.description,
+            "topics": [{"id": t.id, "name": t.name} for t in topics]
         })
     return JsonResponse({"success": True, "data": {"modules": data}})
 
@@ -90,6 +111,37 @@ def update_module(request, module_id):
         module.updated_at = timezone.now()
         module.save()
 
+        # Update topics
+        topics_data = data.get("topics", [])
+        # Simple approach: deactivate old topics and create new ones, or sync them.
+        # Given the current model, let's just create ones that don't exist.
+        # But wait, the frontend sends the whole list.
+        # Better approach: 
+        existing_topic_ids = list(Topic.objects.filter(module=module, is_active=True).values_list('id', flat=True))
+        incoming_topic_ids = [t.get('id') for t in topics_data if t.get('id') and not str(t.get('id')).startswith('t')]
+        
+        # Deactivate topics not in incoming list
+        Topic.objects.filter(module=module, id__in=[tid for tid in existing_topic_ids if tid not in incoming_topic_ids]).update(is_active=False)
+        
+        # Create new topics or update existing
+        for t_data in topics_data:
+            t_id = t_data.get('id')
+            t_name = t_data.get('name')
+            if not t_name: continue
+            
+            if not t_id or str(t_id).startswith('t'):
+                Topic.objects.create(
+                    name=t_name,
+                    module=module,
+                    is_active=True,
+                    created_at=timezone.now(),
+                    updated_at=timezone.now()
+                )
+            else:
+                Topic.objects.filter(id=t_id, module=module).update(name=t_name, updated_at=timezone.now())
+
+        final_topics = Topic.objects.filter(module=module, is_active=True)
+
         return JsonResponse({
             "success": True,
             "data": {
@@ -98,6 +150,7 @@ def update_module(request, module_id):
                     "name": module.name,
                     "code": module.code,
                     "description": module.description,
+                    "topics": [{"id": t.id, "name": t.name} for t in final_topics]
                 }
             }
         })

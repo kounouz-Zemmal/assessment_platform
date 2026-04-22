@@ -169,10 +169,12 @@ export default function AdminModules() {
     setNewTopicName("");
   };
 
-  const handleCloseDialog = () => {
-    setIsCreateDialogOpen(false);
-    setEditingModule(null);
-    resetForm();
+  const handleOpenChange = (open: boolean) => {
+    if (!open) {
+      setIsCreateDialogOpen(false);
+      setEditingModule(null);
+      resetForm();
+    }
   };
 
   return (
@@ -182,7 +184,7 @@ export default function AdminModules() {
           <h1 className="text-3xl font-bold text-gray-900">Module Management</h1>
           <p className="text-gray-500 mt-1">Create and manage course modules and topics</p>
         </div>
-        <Dialog open={isCreateDialogOpen || !!editingModule} onOpenChange={handleCloseDialog}>
+        <Dialog open={isCreateDialogOpen || !!editingModule} onOpenChange={handleOpenChange}>
           <DialogTrigger asChild>
             <Button onClick={() => setIsCreateDialogOpen(true)}>
               <Plus className="h-4 w-4 mr-2" />
@@ -261,7 +263,7 @@ export default function AdminModules() {
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={handleCloseDialog}>
+              <Button variant="outline" onClick={() => handleOpenChange(false)}>
                 Cancel
               </Button>
               <Button onClick={editingModule ? handleUpdateModule : handleCreateModule}>
