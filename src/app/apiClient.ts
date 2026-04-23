@@ -18,6 +18,24 @@ function handleAuthFailure(path: string, status: number) {
   }
 }
 
+function isAuthRedirectResponse(response: Response): boolean {
+  try {
+    const parsed = new URL(response.url, window.location.origin);
+    return parsed.pathname === "/api/auth/login";
+  } catch {
+    return false;
+  }
+}
+
+function throwIfSessionRedirect(path: string, response: Response) {
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  if (normalizedPath.startsWith("auth/")) return;
+  if (!isAuthRedirectResponse(response)) return;
+  // Django login_required may redirect non-GET API calls to login endpoint.
+  handleAuthFailure(path, 401);
+  throw new Error("Session expired. Please sign in again.");
+}
+
 function buildUrl(path: string, params?: QueryParams): string {
   const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
   const baseUrl = API_BASE_URL.replace(/\/$/, "");
@@ -82,6 +100,7 @@ export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> 
   const response = await fetch(buildUrl(path, params), {
     credentials: 'include',
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -119,6 +138,7 @@ export async function apiPost<T>(
     credentials: 'include',
     body: JSON.stringify(payload),
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -156,6 +176,7 @@ export async function apiPatch<T>(
     credentials: 'include',
     body: JSON.stringify(payload),
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -193,6 +214,7 @@ export async function apiPut<T>(
     credentials: 'include',
     body: JSON.stringify(payload),
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -224,6 +246,7 @@ export async function apiDelete<T>(path: string, params?: QueryParams): Promise<
     },
     credentials: 'include',
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {

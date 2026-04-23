@@ -13,6 +13,27 @@ import { toast } from "sonner";
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet, apiPatch, apiPost } from "../../apiClient";
 
+/** Calendar parts in the user's local timezone (avoid UTC day shifts from toISOString()). */
+function formatLocalDateYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function formatLocalHm(d: Date): string {
+  const h = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${h}:${min}`;
+}
+
+function parseLocalDateTime(dateStr: string, timeStr: string): Date | null {
+  if (!dateStr || !timeStr) return null;
+  const normalizedTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
+  const d = new Date(`${dateStr}T${normalizedTime}`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export default function TeacherCreateAssessment() {
   const navigate = useNavigate();
   const { id } = useParams();
@@ -51,7 +72,8 @@ export default function TeacherCreateAssessment() {
   const [formData, setFormData] = useState({
     title: "",
     moduleId: "",
-    duration: 60,
+    /** String so typing "7" / "17" is not corrupted by parseInt on partial number input. */
+    durationMinutes: "60",
     startDate: "",
     startTime: "",
     endDate: "",
@@ -107,18 +129,18 @@ export default function TeacherCreateAssessment() {
         setFormData({
           title: assessment.title || "",
           moduleId: assessment.moduleId || "",
-          duration: assessment.duration || 60,
+          durationMinutes: String(Math.max(1, assessment.duration || 60)),
           startDate: assessment.startTime
-            ? new Date(assessment.startTime).toISOString().split("T")[0]
+            ? formatLocalDateYmd(new Date(assessment.startTime))
             : "",
           startTime: assessment.startTime
-            ? new Date(assessment.startTime).toTimeString().slice(0, 5)
+            ? formatLocalHm(new Date(assessment.startTime))
             : "",
           endDate: assessment.endTime
-            ? new Date(assessment.endTime).toISOString().split("T")[0]
+            ? formatLocalDateYmd(new Date(assessment.endTime))
             : "",
           endTime: assessment.endTime
-            ? new Date(assessment.endTime).toTimeString().slice(0, 5)
+            ? formatLocalHm(new Date(assessment.endTime))
             : "",
           selectedQuestions: assessment.questions || [],
           randomize: assessment.randomize || false,
@@ -161,6 +183,33 @@ export default function TeacherCreateAssessment() {
       });
   }, [formData.moduleId]);
 
+  useEffect(() => {
+    if (!formData.startDate || !formData.startTime) {
+      return;
+    }
+    const parsedDur = parseInt(formData.durationMinutes, 10);
+    if (!Number.isFinite(parsedDur) || parsedDur < 1) {
+      return;
+    }
+    const minutes = parsedDur;
+    const start = parseLocalDateTime(formData.startDate, formData.startTime);
+    if (!start) {
+      return;
+    }
+    const end = new Date(start.getTime() + minutes * 60 * 1000);
+    const nextEndDate = formatLocalDateYmd(end);
+    const nextEndTime = formatLocalHm(end);
+
+    if (formData.endDate === nextEndDate && formData.endTime === nextEndTime) {
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      endDate: nextEndDate,
+      endTime: nextEndTime,
+    }));
+  }, [formData.startDate, formData.startTime, formData.durationMinutes, formData.endDate, formData.endTime]);
+
   const toggleQuestion = (questionId: string) => {
     setFormData({
       ...formData,
@@ -192,20 +241,18 @@ export default function TeacherCreateAssessment() {
       return;
     }
 
-    const startTimeIso =
-      formData.startDate && formData.startTime
-        ? new Date(`${formData.startDate}T${formData.startTime}`).toISOString()
-        : null;
-    const endTimeIso =
-      formData.endDate && formData.endTime
-        ? new Date(`${formData.endDate}T${formData.endTime}`).toISOString()
-        : null;
+    const startLocal = parseLocalDateTime(formData.startDate, formData.startTime);
+    const endLocal = parseLocalDateTime(formData.endDate, formData.endTime);
+    const startTimeIso = startLocal ? startLocal.toISOString() : null;
+    const endTimeIso = endLocal ? endLocal.toISOString() : null;
+
+    const durationValue = Math.max(1, parseInt(formData.durationMinutes, 10) || 60);
 
     try {
       const payload = {
         title: formData.title.trim(),
         moduleId: formData.moduleId,
-        duration: formData.duration,
+        duration: durationValue,
         startTime: startTimeIso,
         endTime: endTimeIso,
         selectedQuestions: formData.selectedQuestions,
@@ -298,10 +345,21 @@ export default function TeacherCreateAssessment() {
               <Label htmlFor="duration">Duration (minutes) *</Label>
               <Input
                 id="duration"
-                type="number"
-                min="1"
-                value={formData.duration}
-                onChange={(e) => setFormData({ ...formData, duration: parseInt(e.target.value) })}
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={formData.durationMinutes}
+                onChange={(e) => {
+                  const raw = e.target.value.replace(/\D/g, "");
+                  setFormData({ ...formData, durationMinutes: raw });
+                }}
+                onBlur={() => {
+                  const n = parseInt(formData.durationMinutes, 10);
+                  const next = Number.isFinite(n) && n >= 1 ? String(n) : "60";
+                  setFormData({ ...formData, durationMinutes: next });
+                }}
+                onWheel={(e) => e.currentTarget.blur()}
+                placeholder="e.g. 60"
               />
             </div>
           </CardContent>

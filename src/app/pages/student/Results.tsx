@@ -22,6 +22,7 @@ import { Skeleton } from "../../components/ui/skeleton";
 import { useMinimumSkeletonTime } from "../../hooks/useMinimumSkeletonTime";
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet } from "../../apiClient";
+import { listOutbox } from "../../services/examPersistence";
 
 type StudentResultsApiResponse = {
   assessment: {
@@ -55,8 +56,6 @@ type StudentResultsApiResponse = {
       answer: string;
       correctAnswer: string | null;
       autoScore: number;
-      detectedKeywords: string[];
-      missingKeywords: string[];
       teacherComment: string | null;
     }>;
   };
@@ -132,6 +131,7 @@ export default function StudentResults() {
   );
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [submissionPendingSync, setSubmissionPendingSync] = useState(false);
   const showLoadingSkeleton = useMinimumSkeletonTime(loading);
 
   useEffect(() => {
@@ -142,10 +142,20 @@ export default function StudentResults() {
 
     setLoading(true);
     setLoadError(null);
+    setSubmissionPendingSync(false);
     apiGet<StudentResultsApiResponse>(`student/results/${id}`)
       .then((data) => setApiData(data))
-      .catch(() => {
+      .catch(async () => {
         setApiData(null);
+        const queued = (await listOutbox().catch(() => [])) || [];
+        const hasQueuedSubmit = queued.some(
+          (item) => item.assessmentId === id && item.kind === "submit",
+        );
+        if (hasQueuedSubmit) {
+          setSubmissionPendingSync(true);
+          setLoadError("Your submission is queued locally and will appear after sync.");
+          return;
+        }
         setLoadError("Could not load results from backend.");
       })
       .finally(() => setLoading(false));
@@ -200,6 +210,11 @@ export default function StudentResults() {
             {loadError && (
               <p className="text-sm text-gray-500 mt-1">{loadError}</p>
             )}
+            {submissionPendingSync && (
+              <p className="text-sm text-amber-600 mt-2">
+                You can reconnect to internet to sync and then refresh this page.
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -232,10 +247,7 @@ export default function StudentResults() {
     uiVisibility.showQuestionBreakdown ??
     true;
   const showTeacherFeedback = uiVisibility.showTeacherFeedback ?? true;
-  const showAiKeywordAnalysis =
-    uiVisibility.showAiKeywordAnalysis ??
-    uiVisibility.showKeywordAnalysis ??
-    true;
+  const showAiKeywordAnalysis = false;
   const showPerQuestionDetails =
     uiVisibility.showPerQuestionDetails ?? showScoreBreakdown;
 
@@ -304,9 +316,6 @@ export default function StudentResults() {
           </Badge>
           <Badge variant={showTeacherFeedback ? "default" : "secondary"}>
             Feedback {showTeacherFeedback ? "Visible" : "Hidden"}
-          </Badge>
-          <Badge variant={showAiKeywordAnalysis ? "default" : "secondary"}>
-            AI Analysis {showAiKeywordAnalysis ? "Visible" : "Hidden"}
           </Badge>
           <Badge variant={showPerQuestionDetails ? "default" : "secondary"}>
             Per-question Details {showPerQuestionDetails ? "Visible" : "Hidden"}
@@ -556,63 +565,7 @@ export default function StudentResults() {
                         </div>
                       )}
 
-                      {answer.questionType === "DESCRIPTIVE" &&
-                        showAiKeywordAnalysis && (
-                          <div className="mt-3 p-3 bg-blue-50 rounded-lg">
-                            <p className="text-sm font-semibold text-blue-900 mb-2">
-                              Keyword Analysis
-                            </p>
-                            <div className="space-y-2">
-                              {answer.detectedKeywords.length > 0 && (
-                                <div>
-                                  <p className="text-xs text-gray-600">
-                                    Detected Keywords:
-                                  </p>
-                                  <div className="flex flex-wrap gap-1 mt-1">
-                                    {answer.detectedKeywords.map(
-                                      (keyword, idx) => (
-                                        <Badge
-                                          key={idx}
-                                          variant="default"
-                                          className="bg-green-500 text-xs"
-                                        >
-                                          {keyword}
-                                        </Badge>
-                                      ),
-                                    )}
-                                  </div>
-                                </div>
-                              )}
-                              {answer.missingKeywords.length > 0 && (
-                                <div>
-                                  <p className="text-xs text-gray-600">
-                                    Missing Keywords:
-                                  </p>
-                                  <div className="flex flex-wrap gap-1 mt-1">
-                                    {answer.missingKeywords.map(
-                                      (keyword, idx) => (
-                                        <Badge
-                                          key={idx}
-                                          variant="secondary"
-                                          className="bg-red-100 text-red-700 text-xs"
-                                        >
-                                          {keyword}
-                                        </Badge>
-                                      ),
-                                    )}
-                                  </div>
-                                </div>
-                              )}
-                              {answer.detectedKeywords.length === 0 &&
-                                answer.missingKeywords.length === 0 && (
-                                  <p className="text-xs text-gray-600">
-                                    No keyword analysis has been saved yet for
-                                    this answer.
-                                  </p>
-                                )}
-                            </div>
-                          </div>
-                        )}
+                      {/* Student view intentionally excludes keyword/AI analysis details. */}
                     </div>
                   </div>
                 ))}

@@ -2,8 +2,10 @@ import json
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from datetime import timedelta
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -27,9 +29,14 @@ from apps.assessments.models import (
     QuestionKeyword,
     QuestionStat,
 )
+from apps.assessments.lifecycle import refresh_assessment_lifecycle
 from apps.common.utils import (
     assessment_status,
     attempt_status,
+    build_proctor_status,
+    normalize_aware_datetime,
+    PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS,
+    proctor_cache_key,
     to_float,
     to_percentage,
     visibility_payload,
@@ -101,6 +108,20 @@ def _is_lecturer_for_module(teacher_id, module_id):
     return normalized == "lecturer"
 
 
+def _assessment_resolved_end_time(assessment):
+    """
+    Earliest of: scheduled end_time, or start + duration. Matches student timer deadline logic
+    so teacher lists (Upcoming/Passed) align with the real window students see.
+    """
+    start = normalize_aware_datetime(assessment.start_time) if assessment.start_time else None
+    end = normalize_aware_datetime(assessment.end_time) if assessment.end_time else None
+    duration_mins = int(assessment.duration_minutes or 0)
+    duration_end = start + timedelta(minutes=duration_mins) if start and duration_mins > 0 else None
+    if end and duration_end:
+        return min(end, duration_end)
+    return end or duration_end
+
+
 def _serialize_assessment(
     assessment,
     questions_by_assessment_id=None,
@@ -115,6 +136,7 @@ def _serialize_assessment(
     else:
         question_ids = questions_by_assessment_id.get(assessment.id, [])
 
+    resolved_end = _assessment_resolved_end_time(assessment)
     return {
         "id": str(assessment.id),
         "title": assessment.title,
@@ -123,6 +145,7 @@ def _serialize_assessment(
         "duration": int(assessment.duration_minutes or 0),
         "startTime": assessment.start_time.isoformat() if assessment.start_time else None,
         "endTime": assessment.end_time.isoformat() if assessment.end_time else None,
+        "resolvedEndTime": resolved_end.isoformat() if resolved_end else None,
         "status": assessment_status(assessment.status),
         "questions": [str(question_id) for question_id in question_ids],
         "randomize": bool(assessment.shuffle_questions),
@@ -606,6 +629,106 @@ def teacher_analytics(request):
 @login_required
 @user_passes_test(is_teacher)
 @require_GET
+def teacher_live_proctoring_current(request):
+    teacher_id = request.user.id
+    module_ids = _teacher_module_ids(teacher_id)
+    now = timezone.now()
+
+    candidate_assessments = list(
+        Assessment.objects.filter(
+            Q(created_by_id=teacher_id) | Q(module_id__in=module_ids),
+            deleted_at__isnull=True,
+        )
+        .select_related("module")
+        .order_by("start_time", "-created_at")
+    )
+
+    live_candidates = []
+    for assessment in candidate_assessments:
+        refresh_assessment_lifecycle(assessment)
+        start_time = normalize_aware_datetime(assessment.start_time)
+        end_time = normalize_aware_datetime(assessment.end_time)
+        if not start_time or not end_time:
+            continue
+        if not (start_time <= now <= end_time):
+            continue
+        active_count = Attempt.objects.filter(assessment_id=assessment.id, status="IN_PROGRESS").count()
+        if active_count <= 0:
+            continue
+        live_candidates.append((assessment, active_count, start_time))
+
+    if not live_candidates:
+        return JsonResponse(
+            {
+                "assessment": None,
+                "thresholdSeconds": PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS,
+                "activeStudentsCount": 0,
+                "rows": [],
+            }
+        )
+
+    # Prefer the assessment with the most active students, then earliest start.
+    live_candidates.sort(key=lambda item: (-item[1], item[2]))
+    assessment, _, start_time = live_candidates[0]
+    end_time = normalize_aware_datetime(assessment.end_time)
+
+    in_progress_attempts = list(
+        Attempt.objects.filter(assessment_id=assessment.id, status="IN_PROGRESS")
+        .select_related("student")
+        .order_by("-last_activity_at", "-updated_at")
+    )
+
+    rows = []
+    for attempt in in_progress_attempts:
+        event = cache.get(proctor_cache_key(assessment.id, attempt.student_id)) or {}
+        status = build_proctor_status(event, now=now)
+        rows.append(
+            {
+                "attemptId": str(attempt.id),
+                "studentId": str(attempt.student_id),
+                "studentName": f"{attempt.student.first_name} {attempt.student.last_name}".strip(),
+                "studentEmail": attempt.student.email,
+                "statusColor": "red" if status["isSuspicious"] else "green",
+                "isSuspicious": status["isSuspicious"],
+                "outsideDurationSeconds": status["outsideDurationSeconds"],
+                "staleSeconds": status["staleSeconds"],
+                "visibilityState": event.get("visibilityState") or "visible",
+                "currentQuestionIndex": int(event.get("currentQuestionIndex") or 0),
+                "lastSeenAt": event.get("lastSeenAt")
+                or (attempt.last_activity_at.isoformat() if attempt.last_activity_at else None),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            0 if item["isSuspicious"] else 1,
+            -int(item.get("outsideDurationSeconds") or 0),
+            -int(item.get("staleSeconds") or 0),
+            (item.get("studentName") or "").lower(),
+        )
+    )
+
+    return JsonResponse(
+        {
+            "assessment": {
+                "id": str(assessment.id),
+                "title": assessment.title,
+                "moduleCode": assessment.module.code,
+                "moduleName": assessment.module.name,
+                "status": assessment_status(assessment.status),
+                "startTime": start_time.isoformat() if start_time else None,
+                "endTime": end_time.isoformat() if end_time else None,
+            },
+            "thresholdSeconds": PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS,
+            "activeStudentsCount": len(rows),
+            "rows": rows,
+        }
+    )
+
+
+@login_required
+@user_passes_test(is_teacher)
+@require_GET
 def teacher_dashboard(request):
     teacher_id = request.user.id
     module_ids = _teacher_module_ids(teacher_id)
@@ -632,6 +755,70 @@ def teacher_dashboard(request):
         .order_by("start_time", "-created_at")[:8]
     )
 
+    now = timezone.now()
+    MAX_LIVE_ASSESSMENTS = 3
+    MAX_LIVE_STUDENTS_PER_ASSESSMENT = 12
+    live_proctoring = []
+    for assessment in active_assessments:
+        refresh_assessment_lifecycle(assessment)
+        start_time = normalize_aware_datetime(assessment.start_time)
+        end_time = normalize_aware_datetime(assessment.end_time)
+        # Show only assessments that are explicitly live inside their scheduled window.
+        if not start_time or not end_time:
+            continue
+        is_window_open = now >= start_time and now <= end_time
+        if not is_window_open:
+            continue
+
+        in_progress_attempts = list(
+            Attempt.objects.filter(assessment_id=assessment.id, status="IN_PROGRESS")
+            .select_related("student")
+            .order_by("-last_activity_at", "-updated_at")
+        )
+        rows = []
+        for attempt in in_progress_attempts:
+            event = cache.get(proctor_cache_key(assessment.id, attempt.student_id)) or {}
+            status = build_proctor_status(event, now=now)
+            rows.append(
+                {
+                    "attemptId": str(attempt.id),
+                    "studentId": str(attempt.student_id),
+                    "studentName": f"{attempt.student.first_name} {attempt.student.last_name}".strip(),
+                    "studentEmail": attempt.student.email,
+                    "statusColor": "red" if status["isSuspicious"] else "green",
+                    "isSuspicious": status["isSuspicious"],
+                    "outsideDurationSeconds": status["outsideDurationSeconds"],
+                    "staleSeconds": status["staleSeconds"],
+                    "visibilityState": event.get("visibilityState") or "visible",
+                    "currentQuestionIndex": int(event.get("currentQuestionIndex") or 0),
+                    "lastSeenAt": event.get("lastSeenAt")
+                    or (attempt.last_activity_at.isoformat() if attempt.last_activity_at else None),
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                0 if item["isSuspicious"] else 1,
+                -int(item.get("outsideDurationSeconds") or 0),
+                -int(item.get("staleSeconds") or 0),
+                (item.get("studentName") or "").lower(),
+            )
+        )
+        rows = rows[:MAX_LIVE_STUDENTS_PER_ASSESSMENT]
+        if not rows:
+            continue
+        live_proctoring.append(
+            {
+                "assessmentId": str(assessment.id),
+                "assessmentTitle": assessment.title,
+                "moduleCode": assessment.module.code,
+                "activeStudentsCount": len(rows),
+                "thresholdSeconds": PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS,
+                "rows": rows,
+            }
+        )
+    live_proctoring.sort(key=lambda item: item.get("activeStudentsCount", 0), reverse=True)
+    live_proctoring = live_proctoring[:MAX_LIVE_ASSESSMENTS]
+
     return JsonResponse(
         {
             "stats": {
@@ -653,6 +840,81 @@ def teacher_dashboard(request):
                 }
                 for assessment in active_assessments
             ],
+            "liveProctoring": live_proctoring,
+        }
+    )
+
+
+@login_required
+@user_passes_test(is_teacher)
+@require_GET
+def teacher_assessment_live_proctoring(request, assessment_id):
+    teacher_id = request.user.id
+    module_ids = _teacher_module_ids(teacher_id)
+    try:
+        assessment = Assessment.objects.select_related("module").get(id=assessment_id, deleted_at__isnull=True)
+    except Assessment.DoesNotExist:
+        return JsonResponse({"detail": "Assessment not found"}, status=404)
+
+    if assessment.module_id not in module_ids and assessment.created_by_id != teacher_id:
+        return JsonResponse({"detail": "Not allowed for this assessment"}, status=403)
+
+    now = timezone.now()
+    start_time = normalize_aware_datetime(assessment.start_time)
+    end_time = normalize_aware_datetime(assessment.end_time)
+    is_window_open = (start_time is None or now >= start_time) and (end_time is None or now <= end_time)
+
+    in_progress_attempts = list(
+        Attempt.objects.filter(assessment_id=assessment.id, status="IN_PROGRESS")
+        .select_related("student")
+        .order_by("-last_activity_at", "-updated_at")
+    )
+
+    rows = []
+    for attempt in in_progress_attempts:
+        event = cache.get(proctor_cache_key(assessment.id, attempt.student_id)) or {}
+        status = build_proctor_status(event, now=now)
+        rows.append(
+            {
+                "attemptId": str(attempt.id),
+                "studentId": str(attempt.student_id),
+                "studentName": f"{attempt.student.first_name} {attempt.student.last_name}".strip(),
+                "studentEmail": attempt.student.email,
+                "statusColor": "red" if status["isSuspicious"] else "green",
+                "isSuspicious": status["isSuspicious"],
+                "outsideDurationSeconds": status["outsideDurationSeconds"],
+                "staleSeconds": status["staleSeconds"],
+                "visibilityState": event.get("visibilityState") or "visible",
+                "currentQuestionIndex": int(event.get("currentQuestionIndex") or 0),
+                "lastSeenAt": event.get("lastSeenAt")
+                or (attempt.last_activity_at.isoformat() if attempt.last_activity_at else None),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            0 if item["isSuspicious"] else 1,
+            -int(item.get("outsideDurationSeconds") or 0),
+            -int(item.get("staleSeconds") or 0),
+            (item.get("studentName") or "").lower(),
+        )
+    )
+
+    return JsonResponse(
+        {
+            "assessment": {
+                "id": str(assessment.id),
+                "title": assessment.title,
+                "moduleCode": assessment.module.code,
+                "moduleName": assessment.module.name,
+                "status": assessment_status(assessment.status),
+                "startTime": start_time.isoformat() if start_time else None,
+                "endTime": end_time.isoformat() if end_time else None,
+                "isWindowOpen": is_window_open,
+            },
+            "thresholdSeconds": PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS,
+            "activeStudentsCount": len(rows),
+            "rows": rows,
         }
     )
 
@@ -1001,6 +1263,11 @@ def teacher_assessments(request):
             return JsonResponse({"detail": "Validation failed", "errors": parsed["errors"]}, status=400)
 
         now = timezone.now()
+        initial_status = (
+            ASSESSMENT_STATUS_TO_DB["Scheduled"]
+            if parsed["start_time"]
+            else ASSESSMENT_STATUS_TO_DB["Draft"]
+        )
         with transaction.atomic():
             assessment = Assessment.objects.create(
                 title=parsed["title"],
@@ -1011,7 +1278,7 @@ def teacher_assessments(request):
                 duration_minutes=parsed["duration"],
                 start_time=parsed["start_time"],
                 end_time=parsed["end_time"],
-                status=ASSESSMENT_STATUS_TO_DB["Draft"],
+                status=initial_status,
                 shuffle_questions=parsed["randomize"],
                 shuffle_choices=parsed["shuffle_answers"],
                 auto_submit=parsed["auto_submit_on_timeout"],
@@ -1063,6 +1330,9 @@ def teacher_assessments(request):
     for row in rows:
         questions_by_assessment_id[row["assessment_id"]].append(row["question_id"])
 
+    for assessment in assessments:
+        refresh_assessment_lifecycle(assessment)
+
     return JsonResponse(
         {
             "assessments": [
@@ -1091,6 +1361,8 @@ def teacher_assessment_detail(request, assessment_id):
 
     if not (assessment.created_by_id == teacher_id or assessment.module_id in module_ids):
         return JsonResponse({"detail": "Not allowed for this assessment"}, status=403)
+
+    refresh_assessment_lifecycle(assessment)
 
     if request.method == "GET":
         return JsonResponse(

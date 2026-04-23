@@ -11,6 +11,8 @@ import {
   TrendingUp,
   BookOpen,
   AlertCircle,
+  ShieldAlert,
+  Circle,
 } from "lucide-react";
 import { apiGet } from "../../apiClient";
 import { useAuth } from "../../contexts/AuthContext";
@@ -47,6 +49,10 @@ const injectStyles = () => {
     @keyframes td-soft-float {
       0%, 100% { transform: translateY(0); }
       50% { transform: translateY(-2px); }
+    }
+    @keyframes td-blink-danger {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .35; }
     }
 
     .td-root {
@@ -262,6 +268,9 @@ const injectStyles = () => {
       margin: 0 auto 10px;
       opacity: .35;
     }
+    .td-danger-blink {
+      animation: td-blink-danger 1s ease-in-out infinite;
+    }
   `;
   document.head.appendChild(s);
 };
@@ -286,6 +295,25 @@ export default function TeacherDashboard() {
       title: string;
       duration: number;
       startTime: string | null;
+      moduleCode?: string;
+    }>;
+    liveProctoring?: Array<{
+      assessmentId: string;
+      assessmentTitle: string;
+      moduleCode: string;
+      activeStudentsCount: number;
+      thresholdSeconds: number;
+      rows: Array<{
+        studentId: string;
+        studentName: string;
+        studentEmail: string;
+        statusColor: "green" | "red";
+        isSuspicious: boolean;
+        outsideDurationSeconds: number;
+        staleSeconds: number;
+        currentQuestionIndex: number;
+        visibilityState: string;
+      }>;
     }>;
   } | null>(null);
 
@@ -293,10 +321,17 @@ export default function TeacherDashboard() {
     if (!user || user.role !== "teacher") { setLoading(false); return; }
     setLoading(true);
     setError(null);
-    apiGet<typeof dashboardData>("teacher/dashboard")
-      .then((data) => setDashboardData(data))
+    const fetchDashboard = async () => {
+      const data = await apiGet<typeof dashboardData>("teacher/dashboard");
+      setDashboardData(data);
+    };
+    fetchDashboard()
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load dashboard"))
       .finally(() => setLoading(false));
+    const interval = setInterval(() => {
+      void fetchDashboard().catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
   }, [user]);
 
   const stats = dashboardData?.stats ?? {
@@ -575,6 +610,65 @@ export default function TeacherDashboard() {
           </div>
         </div>
       )}
+
+      <div className="td-card" style={{ marginTop: 24 }}>
+        <div className="td-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <p className="td-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <ShieldAlert size={18} color="#dc2626" />
+            Live Proctoring
+          </p>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>Auto-live (refreshes every 5s)</span>
+        </div>
+        <div className="td-divider" style={{ margin: "14px 22px 0" }} />
+        <div className="td-card-body">
+          {loading && <div className="td-empty">Loading live activity…</div>}
+          {!loading && (!dashboardData?.liveProctoring || dashboardData.liveProctoring.length === 0) && (
+            <div className="td-empty">No assessments are currently in their active time window.</div>
+          )}
+          {!loading && (dashboardData?.liveProctoring || []).map((block) => (
+            <div key={block.assessmentId} style={{ marginBottom: 16 }}>
+              <p style={{ margin: "0 0 8px", fontSize: 13, color: "#374151", fontWeight: 600 }}>
+                {block.assessmentTitle} ({block.moduleCode}) - {block.activeStudentsCount} active
+              </p>
+              {block.rows.length === 0 ? (
+                <div className="td-empty" style={{ padding: "12px 0" }}>No students currently taking this assessment.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {block.rows.map((row) => (
+                    <div
+                      key={`${block.assessmentId}-${row.studentId}`}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        border: "1px solid #e5e7eb",
+                        borderRadius: 10,
+                        padding: "10px 12px",
+                        background: row.isSuspicious ? "#fef2f2" : "#f0fdf4",
+                      }}
+                      className={row.isSuspicious ? "td-danger-blink" : ""}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#111827" }}>{row.studentName}</p>
+                        <p style={{ margin: "3px 0 0", fontSize: 12, color: "#6b7280" }}>{row.studentEmail}</p>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12, color: "#374151" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <Circle size={12} fill={row.statusColor === "red" ? "#dc2626" : "#16a34a"} color={row.statusColor === "red" ? "#dc2626" : "#16a34a"} />
+                          {row.statusColor === "red" ? "Suspicious" : "Normal"}
+                        </span>
+                        <span>Outside: {row.outsideDurationSeconds}s</span>
+                        <span>Q{Math.max(1, row.currentQuestionIndex + 1)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

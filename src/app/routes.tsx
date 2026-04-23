@@ -15,6 +15,7 @@ import TeacherSubmissions from "./pages/teacher/Submissions";
 import TeacherGrading from "./pages/teacher/Grading";
 import TeacherAnalytics from "./pages/teacher/Analytics";
 import TeacherModules from "./pages/teacher/Modules";
+import TeacherLiveProctoring from "./pages/teacher/LiveProctoring";
 import StudentDashboard from "./pages/student/Dashboard";
 import StudentAssessments from "./pages/student/Assessments";
 import StudentExamInstructions from "./pages/student/ExamInstructions";
@@ -62,6 +63,7 @@ export const router = createBrowserRouter([
       { path: "assessments/:id/submissions", element: <TeacherSubmissions /> },
       { path: "grading/:submissionId", element: <TeacherGrading /> },
       { path: "analytics", element: <TeacherAnalytics /> },
+      { path: "live-proctoring", element: <TeacherLiveProctoring /> },
       {
         path: "results-visibility",
         element: (

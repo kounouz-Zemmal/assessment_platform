@@ -1,23 +1,50 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { AlertCircle, Clock, FileText, ArrowRight } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Alert, AlertDescription } from "../../components/ui/alert";
-import { assessments, modules } from "../../mockData";
+import { Checkbox } from "../../components/ui/checkbox";
+import { Label } from "../../components/ui/label";
+import { apiGet, apiPost } from "../../apiClient";
+import { toast } from "sonner";
 
 export default function StudentExamInstructions() {
   const { id } = useParams();
   const navigate = useNavigate();
-  
-  const assessment = assessments.find((a) => a.id === id);
-  const module = assessment ? modules.find((m) => m.id === assessment.moduleId) : null;
+  const [assessment, setAssessment] = useState<any | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  if (!assessment || !module) {
+  useEffect(() => {
+    if (!id) return;
+    setLoading(true);
+    apiGet<{ assessment: any }>(`student/assessments/${id}/instructions`)
+      .then((data) => setAssessment(data.assessment))
+      .catch(() => setAssessment(null))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  if (loading) {
+    return <div className="p-8">Loading assessment...</div>;
+  }
+
+  if (!assessment) {
     return <div className="p-8">Assessment not found</div>;
   }
 
-  const handleStartExam = () => {
-    navigate(`/student/assessments/${id}/take`);
+  const handleStartExam = async () => {
+    try {
+      await apiPost(`student/assessments/${id}/attempt/start`, {});
+      navigate(`/student/assessments/${id}/take`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to start assessment";
+      if (message.includes("already submitted")) {
+        navigate(`/student/assessments/${id}/results`);
+        return;
+      }
+      toast.error(message);
+    }
   };
 
   return (
@@ -26,7 +53,7 @@ export default function StudentExamInstructions() {
         <Card>
           <CardHeader>
             <CardTitle className="text-2xl">{assessment.title}</CardTitle>
-            <p className="text-gray-500">{module.code} - {module.name}</p>
+            <p className="text-gray-500">{assessment.moduleCode} - {assessment.moduleName}</p>
           </CardHeader>
           <CardContent className="space-y-6">
             <Alert>
@@ -49,7 +76,7 @@ export default function StudentExamInstructions() {
                 <FileText className="h-8 w-8 text-green-600" />
                 <div>
                   <p className="text-sm text-gray-600">Questions</p>
-                  <p className="font-semibold text-lg">{assessment.questions.length}</p>
+                  <p className="font-semibold text-lg">{Number(assessment?.questionCount ?? 0)}</p>
                 </div>
               </div>
             </div>
@@ -144,6 +171,17 @@ export default function StudentExamInstructions() {
               </AlertDescription>
             </Alert>
 
+            <div className="flex items-center gap-2 rounded-md border p-3">
+              <Checkbox
+                id="instructions-confirm"
+                checked={confirmed}
+                onCheckedChange={(value) => setConfirmed(Boolean(value))}
+              />
+              <Label htmlFor="instructions-confirm">
+                I have read and understood the exam instructions.
+              </Label>
+            </div>
+
             <div className="flex gap-3 pt-4">
               <Button
                 variant="outline"
@@ -154,6 +192,7 @@ export default function StudentExamInstructions() {
               </Button>
               <Button
                 onClick={handleStartExam}
+                disabled={!confirmed}
                 className="flex-1"
               >
                 Start Assessment

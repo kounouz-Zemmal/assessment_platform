@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { Search, Calendar, Clock } from "lucide-react";
 import { Input } from "../../components/ui/input";
@@ -6,43 +6,111 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/ca
 import { Button } from "../../components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import { StatusBadge } from "../../components/StatusBadge";
-import { assessments, submissions, studentEnrollments, modules, getCurrentUser } from "../../mockData";
 import { Badge } from "../../components/ui/badge";
+import { apiGet } from "../../apiClient";
+import { useAuth } from "../../contexts/AuthContext";
+import { toast } from "sonner";
 
 export default function StudentAssessments() {
   const navigate = useNavigate();
-  const currentUser = getCurrentUser();
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
+  const [items, setItems] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const seenNotificationKeysRef = useRef<Set<string>>(new Set());
 
-  const myEnrollments = studentEnrollments.filter((e) => e.studentId === currentUser.id);
-  const myModuleIds = myEnrollments.map((e) => e.moduleId);
-  const availableAssessments = assessments.filter((a) => myModuleIds.includes(a.moduleId));
-  const mySubmissions = submissions.filter((s) => s.studentId === currentUser.id);
-
-  const filteredAssessments = availableAssessments.filter((assessment) =>
-    assessment.title.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  const upcomingAssessments = filteredAssessments.filter((a) => 
-    a.status === "Scheduled" || a.status === "Active"
-  );
-
-  const completedSubmissions = mySubmissions.filter((s) => 
-    s.status === "Graded" || s.status === "Submitted"
-  );
-
-  const completedAssessments = completedSubmissions.map((sub) => 
-    assessments.find((a) => a.id === sub.assessmentId)
-  ).filter(Boolean);
-
-  const getSubmissionForAssessment = (assessmentId: string) => {
-    return mySubmissions.find((s) => s.assessmentId === assessmentId);
+  const fetchAssessments = async (showLoading = false) => {
+    if (!user || user.role !== "student") return;
+    if (showLoading) setLoading(true);
+    try {
+      const data = await apiGet<{ assessments: any[]; notifications?: any[] }>("student/assessments");
+      setItems(data.assessments || []);
+      const nextNotifications = data.notifications || [];
+      // Show availability notifications only on first visible load,
+      // not on every background poll/focus refresh.
+      if (showLoading) {
+        setNotifications(nextNotifications);
+        nextNotifications.forEach((n, idx) => {
+          if (!n?.message) return;
+          const key = String(n.id ?? `${n.message}-${idx}`);
+          if (seenNotificationKeysRef.current.has(key)) return;
+          seenNotificationKeysRef.current.add(key);
+          toast.info(n.message);
+        });
+      }
+    } finally {
+      if (showLoading) setLoading(false);
+    }
   };
 
+  useEffect(() => {
+    if (!user || user.role !== "student") return;
+    void fetchAssessments(true);
+
+    // Background refresh so newly published assessments appear automatically.
+    const intervalId = window.setInterval(() => {
+      void fetchAssessments(false);
+    }, 10000);
+
+    const handleFocus = () => {
+      void fetchAssessments(false);
+    };
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [user]);
+
+  const filteredAssessments = useMemo(
+    () =>
+      items.filter((assessment) =>
+        assessment.title.toLowerCase().includes(searchQuery.toLowerCase()),
+      ),
+    [items, searchQuery],
+  );
+
+  const nowMs = Date.now();
+  const missingAssessments = filteredAssessments
+    .filter((assessment) => {
+      if (assessment.hasSubmission) return false;
+      if (!assessment.endTime) return false;
+      const endMs = new Date(assessment.endTime).getTime();
+      if (Number.isNaN(endMs)) return false;
+      return endMs < nowMs;
+    })
+    .sort((a, b) => {
+      const aTime = a.endTime ? new Date(a.endTime).getTime() : 0;
+      const bTime = b.endTime ? new Date(b.endTime).getTime() : 0;
+      return bTime - aTime;
+    });
+
+  const upcomingAssessments = filteredAssessments
+    .filter((assessment) => {
+      if (assessment.hasSubmission) return false;
+      if (!assessment.endTime) return true;
+      const endMs = new Date(assessment.endTime).getTime();
+      if (Number.isNaN(endMs)) return true;
+      return endMs >= nowMs;
+    })
+    .sort((a, b) => {
+      const aTime = a.startTime ? new Date(a.startTime).getTime() : 0;
+      const bTime = b.startTime ? new Date(b.startTime).getTime() : 0;
+      return aTime - bTime;
+    });
+
+  const completedAssessments = filteredAssessments
+    .filter((assessment) => assessment.hasSubmission)
+    .sort((a, b) => {
+      const aTime = a.startTime ? new Date(a.startTime).getTime() : 0;
+      const bTime = b.startTime ? new Date(b.startTime).getTime() : 0;
+      return bTime - aTime;
+    });
+
   const renderAssessmentCard = (assessment: any) => {
-    const module = modules.find((m) => m.id === assessment.moduleId);
-    const submission = getSubmissionForAssessment(assessment.id);
-    const canStart = assessment.status === "Active" && !submission;
+    const canStart = Boolean(assessment.canStart);
 
     return (
       <Card key={assessment.id} className="hover:shadow-md transition-shadow">
@@ -51,7 +119,7 @@ export default function StudentAssessments() {
             <div className="flex-1">
               <CardTitle className="text-lg mb-2">{assessment.title}</CardTitle>
               <div className="flex items-center gap-2">
-                <Badge variant="outline">{module?.code}</Badge>
+                <Badge variant="outline">{assessment.moduleCode}</Badge>
                 <StatusBadge status={assessment.status} />
               </div>
             </div>
@@ -62,26 +130,36 @@ export default function StudentAssessments() {
             <div className="flex items-center gap-2 text-gray-600">
               <Calendar className="h-4 w-4" />
               <span>
-                {new Date(assessment.startTime).toLocaleDateString()} •{" "}
-                {new Date(assessment.startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                {assessment.startTime
+                  ? `${new Date(assessment.startTime).toLocaleDateString()} • ${new Date(
+                      assessment.startTime,
+                    ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                  : "Start time not set"}
               </span>
             </div>
             <div className="flex items-center gap-2 text-gray-600">
               <Clock className="h-4 w-4" />
               <span>{assessment.duration} minutes</span>
             </div>
+            {assessment.endTime && (
+              <div className="flex items-center gap-2 text-gray-600">
+                <Clock className="h-4 w-4" />
+                <span>
+                  Ends: {new Date(assessment.endTime).toLocaleDateString()} •{" "}
+                  {new Date(assessment.endTime).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+              </div>
+            )}
           </div>
 
-          {submission && (
+          {assessment.hasSubmission && (
             <div className="mb-4 p-3 bg-blue-50 rounded-lg">
               <p className="text-sm text-gray-700">
-                Status: <StatusBadge status={submission.status} />
+                Status: <StatusBadge status="Submitted" />
               </p>
-              {submission.score !== undefined && (
-                <p className="text-sm text-gray-700 mt-1">
-                  Score: <span className="font-bold">{submission.score}/{submission.maxScore}</span>
-                </p>
-              )}
             </div>
           )}
 
@@ -94,7 +172,7 @@ export default function StudentAssessments() {
                 Start Assessment
               </Button>
             )}
-            {submission && (
+            {assessment.hasSubmission && (
               <Button
                 variant="outline"
                 className="flex-1"
@@ -103,9 +181,9 @@ export default function StudentAssessments() {
                 View Results
               </Button>
             )}
-            {!canStart && !submission && assessment.status === "Scheduled" && (
+            {!canStart && !assessment.hasSubmission && (
               <Button variant="outline" className="flex-1" disabled>
-                Not Started
+                Coming
               </Button>
             )}
           </div>
@@ -122,6 +200,13 @@ export default function StudentAssessments() {
       </div>
 
       <div className="mb-6">
+        {notifications.length > 0 && (
+          <Card className="mb-4 border-blue-200 bg-blue-50">
+            <CardContent className="py-3 text-sm text-blue-900">
+              {notifications[0]?.message || "One or more assessments are now available."}
+            </CardContent>
+          </Card>
+        )}
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <Input
@@ -133,10 +218,16 @@ export default function StudentAssessments() {
         </div>
       </div>
 
+      {loading ? (
+        <p className="text-sm text-gray-500">Loading assessments...</p>
+      ) : (
       <Tabs defaultValue="upcoming" className="space-y-6">
         <TabsList>
           <TabsTrigger value="upcoming">
             Upcoming ({upcomingAssessments.length})
+          </TabsTrigger>
+          <TabsTrigger value="missing">
+            Missing ({missingAssessments.length})
           </TabsTrigger>
           <TabsTrigger value="completed">
             Completed ({completedAssessments.length})
@@ -157,6 +248,20 @@ export default function StudentAssessments() {
           )}
         </TabsContent>
 
+        <TabsContent value="missing" className="space-y-6">
+          {missingAssessments.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center">
+                <p className="text-gray-500">No missing assessments</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {missingAssessments.map(renderAssessmentCard)}
+            </div>
+          )}
+        </TabsContent>
+
         <TabsContent value="completed" className="space-y-6">
           {completedAssessments.length === 0 ? (
             <Card>
@@ -171,6 +276,7 @@ export default function StudentAssessments() {
           )}
         </TabsContent>
       </Tabs>
+      )}
     </div>
   );
 }

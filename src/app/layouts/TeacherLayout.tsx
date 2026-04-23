@@ -6,6 +6,7 @@ import {
   ClipboardList,
   GraduationCap,
   BarChart3,
+  ShieldAlert,
   BookOpen,
   Settings,
   LogOut,
@@ -54,6 +55,7 @@ export default function TeacherLayout() {
     { name: "Question Bank", href: "/teacher/questions", icon: FileQuestion },
     { name: "Modules & Topics", href: "/teacher/modules", icon: BookOpen },
     { name: "Assessments", href: "/teacher/assessments", icon: ClipboardList },
+    { name: "Live Proctoring", href: "/teacher/live-proctoring", icon: ShieldAlert },
     { name: "Analytics", href: "/teacher/analytics", icon: BarChart3 },
     {
       name: "Result Visibility",
