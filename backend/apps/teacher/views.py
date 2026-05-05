@@ -1470,7 +1470,7 @@ def teacher_submission_detail(request, submission_id):
                             method="POST",
                             headers={"Content-Type": "application/json"},
                         )
-                        with urllib.request.urlopen(ai_request, timeout=60) as ai_response:
+                        with urllib.request.urlopen(ai_request, timeout=25) as ai_response:
                             ai_raw = ai_response.read().decode("utf-8")
                             ai_payload = json.loads(ai_raw) if ai_raw else {}
                         ai_score = to_float(ai_payload.get("score", row.auto_score or 0))
@@ -1859,7 +1859,7 @@ def teacher_ai_generate(request):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=35) as resp:
             raw = resp.read().decode("utf-8")
             status = resp.status
     except urllib.error.HTTPError as e:

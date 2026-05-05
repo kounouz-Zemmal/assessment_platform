@@ -1,5 +1,5 @@
 """
-Gemini-powered generation for question improvement, model answers, and grading keywords.
+Llama-powered (via Ollama) generation for question improvement, model answers, and grading keywords.
 All provider calls stay in this module (not in Flask routes).
 """
 from __future__ import annotations
@@ -7,18 +7,29 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-import google.generativeai as genai
+import requests
 
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "10.80.11.107")
+OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate"
+OLLAMA_TAGS_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags"
+
 TEMPERATURE = 0.2
 MAX_KEYWORDS = 15
 MIN_KEYWORDS = 5
+CONNECT_TIMEOUT_SECONDS = 2
+READ_TIMEOUT_SECONDS = 25
+HEALTH_TTL_SECONDS = 30
+
+_LAST_HEALTH_CHECK_AT = 0.0
 
 
 class AiServiceError(Exception):
@@ -30,37 +41,65 @@ class AiServiceError(Exception):
         self.status_code = status_code
 
 
-def _get_model() -> genai.GenerativeModel:
-    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-    if not key:
-        raise AiServiceError(
-            "GEMINI_API_KEY is not set. Copy ai_mvp/.env.example to ai_mvp/.env and add your key "
-            "(https://aistudio.google.com/app/apikey).",
-            503,
-        )
+def _verify_ollama_connection() -> None:
+    """Verify that Ollama is reachable and model is available."""
+    global _LAST_HEALTH_CHECK_AT
+    now = time.time()
+    if now - _LAST_HEALTH_CHECK_AT < HEALTH_TTL_SECONDS:
+        return
+
     try:
-        genai.configure(api_key=key)
-        return genai.GenerativeModel(model_name=MODEL)
-    except Exception as exc:  # noqa: BLE001
-        raise AiServiceError(f"Gemini client setup error: {exc!s}", 503) from exc
+        response = requests.get(
+            OLLAMA_TAGS_URL,
+            timeout=(CONNECT_TIMEOUT_SECONDS, CONNECT_TIMEOUT_SECONDS),
+        )
+        response.raise_for_status()
+        data = response.json()
+        models = [m.get("name", "") for m in data.get("models", [])]
+        if OLLAMA_MODEL not in models:
+            raise AiServiceError(
+                f"Model '{OLLAMA_MODEL}' not found on Ollama. Available models: {', '.join(models)}. "
+                f"Run: ollama pull {OLLAMA_MODEL}",
+                503,
+            )
+        _LAST_HEALTH_CHECK_AT = now
+    except requests.RequestException as exc:
+        raise AiServiceError(
+            f"Cannot connect to Ollama at {OLLAMA_URL}. "
+            f"Ensure Ollama is running: ollama serve",
+            503,
+        ) from exc
 
 
 def _chat(system: str, user: str) -> str:
-    model = _get_model()
+    """Call Ollama Llama model with system and user prompts."""
+    _verify_ollama_connection()
     prompt = f"System:\n{system}\n\nUser:\n{user}"
+    
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=TEMPERATURE,
-            ),
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "temperature": TEMPERATURE,
+                "stream": False,
+            },
+            timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
         )
-    except Exception as exc:  # noqa: BLE001 — surface safe message to API
-        raise AiServiceError(f"Gemini API error: {exc!s}", 503) from exc
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise AiServiceError(f"Ollama API error: {exc!s}", 503) from exc
 
-    text = (response.text or "").strip()
+    try:
+        data = response.json()
+        text = (data.get("response") or "").strip()
+    except ValueError as exc:
+        raise AiServiceError(f"Invalid JSON from Ollama: {exc!s}", 503) from exc
+
     if not text:
-        raise AiServiceError("Gemini returned an empty response.", 503)
+        raise AiServiceError("Ollama returned an empty response.", 503)
+    
     return text
 
 
@@ -84,49 +123,52 @@ def _generate_answer(question_text: str) -> str:
 
 def _extract_keywords_from_answer(answer_text: str) -> list[str]:
     system = (
-        "You extract short grading keywords from a model answer for automated keyword-based scoring.\n"
-        "Rules:\n"
-        "- Keywords must be short concepts or phrases (1–4 words each), not full sentences.\n"
-        "- Derive concepts only from the answer text (do not invent facts).\n"
-        "- Return between 5 and 15 items.\n"
-        "- Respond with a single JSON array of strings only, no markdown, no explanation.\n"
-        "Example: [\"photosynthesis\", \"chlorophyll\", \"glucose\"]"
+        f"Extract {MIN_KEYWORDS}–{MAX_KEYWORDS} essential keywords or key phrases from the given text. "
+        "Return as a JSON array of strings (no explanation). "
+        "Example: [\"photosynthesis\", \"chlorophyll\", \"light energy\"]"
     )
-    raw = _chat(system, f"Model answer:\n{answer_text}")
-    return _parse_keyword_json(raw)
+    response_text = _chat(system, f"Text:\n{answer_text}")
+    return _parse_keyword_json(response_text)
 
 
-def _parse_keyword_json(raw: str) -> list[str]:
+def _generate_answer_and_keywords(question_text: str) -> tuple[str, list[str]]:
+    system = (
+        "You are a subject-matter expert and grading assistant.\n"
+        "Given an exam question, provide:\n"
+        "1) a concise model answer\n"
+        "2) 5-15 short grading keywords (1-4 words each), derived only from the answer\n"
+        "Return strict JSON object only: {\"answer\": \"...\", \"keywords\": [\"...\", \"...\"]}"
+    )
+    raw = _chat(system, f"Question:\n{question_text}")
     raw = raw.strip()
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # Fallback: split lines or commas
-        parts = re.split(r"[\n,]", raw)
-        data = [p.strip().strip('"').strip("'") for p in parts if p.strip()]
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AiServiceError(f"Invalid JSON from Ollama for answer+keywords: {exc!s}", 503) from exc
 
-    if not isinstance(data, list):
-        raise AiServiceError("Keyword model did not return a JSON array.", 503)
+    if not isinstance(parsed, dict):
+        raise AiServiceError("Invalid structured answer from Ollama.", 503)
+    answer_text = str(parsed.get("answer", "")).strip()
+    keywords_raw = parsed.get("keywords", [])
+    if not isinstance(keywords_raw, list):
+        keywords_raw = []
+    keywords = [str(k).strip() for k in keywords_raw if str(k).strip()][:MAX_KEYWORDS]
+    return answer_text, keywords
 
-    cleaned: list[str] = []
-    for item in data:
-        if not isinstance(item, str):
-            continue
-        s = item.strip()
-        if not s or len(s) > 80:
-            continue
-        cleaned.append(s)
 
-    # Enforce 5–15 by trimming or padding is wrong; clip to max, require at least what we got
-    cleaned = cleaned[:MAX_KEYWORDS]
-    if len(cleaned) < MIN_KEYWORDS and len(cleaned) > 0:
-        # Accept partial list rather than failing the whole request
-        pass
-    return cleaned
+def _parse_keyword_json(raw: str) -> list[str]:
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(k).strip() for k in parsed if str(k).strip()]
+        except json.JSONDecodeError:
+            pass
+    return []
 
 
 def generate_ai_content(question: str, answer: bool, keywords: bool, improve: bool) -> dict:
@@ -148,19 +190,21 @@ def generate_ai_content(question: str, answer: bool, keywords: bool, improve: bo
 
     # Internal answer text: needed for keywords and/or returned answer field
     internal_answer = ""
-    if answer or keywords:
+    keyword_list: list[str] = []
+    if answer and keywords:
+        internal_answer, keyword_list = _generate_answer_and_keywords(working_question)
+    elif answer or keywords:
         internal_answer = _generate_answer(working_question)
 
     response_answer = internal_answer if answer else ""
 
-    keyword_list: list[str] = []
-    if keywords:
+    if keywords and not keyword_list:
         if not internal_answer:
             internal_answer = _generate_answer(working_question)
         keyword_list = _extract_keywords_from_answer(internal_answer)
 
     return {
-        "improved_question": improved_question if improve else "",
+        "improved_question": improved_question,
         "answer": response_answer,
         "keywords": keyword_list,
     }
@@ -168,49 +212,37 @@ def generate_ai_content(question: str, answer: bool, keywords: bool, improve: bo
 
 def evaluate_answer_with_keywords(answer_text: str, keywords: list[dict], max_points: float) -> dict:
     """
-    Evaluate a student descriptive answer against instructor-selected keywords.
-    Returns JSON-friendly payload:
-      { score, detected_keywords, missing_keywords }
+    Grade a student answer by keyword matching with fuzzy tolerance.
+    Keywords is a list of dicts: [{"text": "...", "weight": 1.0, "synonyms": [...]}, ...]
+    Returns { "points": float, "feedback": str, "keyword_matches": [...] }
     """
-    if max_points <= 0:
-        max_points = 1.0
+    answer_lower = answer_text.lower()
+    keyword_matches = []
+    total_weight = 0.0
+    matched_weight = 0.0
 
-    normalized_keywords: list[dict] = []
-    for item in keywords or []:
-        text = str(item.get("text", "")).strip()
-        if not text:
-            continue
-        try:
-            weight = float(item.get("weight", 1.0))
-        except (TypeError, ValueError):
-            weight = 1.0
-        normalized_keywords.append({"text": text, "weight": max(0.1, weight)})
+    for kw_entry in keywords:
+        kw_text = str(kw_entry.get("text", "")).strip().lower()
+        weight = float(kw_entry.get("weight", 1.0))
+        synonyms = [str(s).strip().lower() for s in kw_entry.get("synonyms", [])]
+        search_terms = [kw_text] + synonyms
 
-    if not normalized_keywords:
-        return {"score": 0.0, "detected_keywords": [], "missing_keywords": []}
+        is_matched = any(term in answer_lower for term in search_terms)
+        total_weight += weight
 
-    normalized_answer = f" {answer_text.lower()} "
-    detected_clean: list[str] = []
-    missing_clean: list[str] = []
-    detected_weight = 0.0
-    total_weight = sum(item["weight"] for item in normalized_keywords) or 1.0
+        if is_matched:
+            keyword_matches.append(kw_text)
+            matched_weight += weight
 
-    for item in normalized_keywords:
-        keyword = item["text"]
-        keyword_lower = keyword.lower()
-        # Word-boundary based containment to avoid accidental partial matches.
-        pattern = r"\b" + re.escape(keyword_lower) + r"\b"
-        if re.search(pattern, normalized_answer):
-            detected_clean.append(keyword)
-            detected_weight += item["weight"]
-        else:
-            missing_clean.append(keyword)
+    # Linear scoring: matched_weight / total_weight * max_points
+    if total_weight > 0:
+        points = (matched_weight / total_weight) * max_points
+    else:
+        points = 0.0
 
-    score = max_points * (detected_weight / total_weight)
-    score = max(0.0, min(max_points, score))
-
+    feedback = f"Matched {len(keyword_matches)}/{len(keywords)} keywords."
     return {
-        "score": score,
-        "detected_keywords": detected_clean,
-        "missing_keywords": missing_clean,
+        "points": round(points, 2),
+        "feedback": feedback,
+        "keyword_matches": keyword_matches,
     }
