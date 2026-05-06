@@ -1,5 +1,5 @@
 """
-Gemini-powered generation for question improvement, model answers, and grading keywords.
+Ollama-powered generation for question improvement, model answers, and grading keywords.
 All provider calls stay in this module (not in Flask routes).
 """
 from __future__ import annotations
@@ -7,15 +7,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
-import google.generativeai as genai
 
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 TEMPERATURE = 0.2
 MAX_KEYWORDS = 15
 MIN_KEYWORDS = 5
@@ -30,37 +32,35 @@ class AiServiceError(Exception):
         self.status_code = status_code
 
 
-def _get_model() -> genai.GenerativeModel:
-    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-    if not key:
-        raise AiServiceError(
-            "GEMINI_API_KEY is not set. Copy ai_mvp/.env.example to ai_mvp/.env and add your key "
-            "(https://aistudio.google.com/app/apikey).",
-            503,
-        )
-    try:
-        genai.configure(api_key=key)
-        return genai.GenerativeModel(model_name=MODEL)
-    except Exception as exc:  # noqa: BLE001
-        raise AiServiceError(f"Gemini client setup error: {exc!s}", 503) from exc
-
-
 def _chat(system: str, user: str) -> str:
-    model = _get_model()
     prompt = f"System:\n{system}\n\nUser:\n{user}"
+    payload = {
+        "model": MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": TEMPERATURE},
+    }
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=TEMPERATURE,
-            ),
+        request = urllib.request.Request(
+            f"{OLLAMA_URL.rstrip('/')}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-    except Exception as exc:  # noqa: BLE001 — surface safe message to API
-        raise AiServiceError(f"Gemini API error: {exc!s}", 503) from exc
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = response.read().decode("utf-8")
+            data = json.loads(raw) if raw else {}
+    except urllib.error.URLError as exc:
+        raise AiServiceError(
+            "Ollama is not reachable. Start Ollama and pull the configured model.",
+            503,
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise AiServiceError(f"Ollama API error: {exc!s}", 503) from exc
 
-    text = (response.text or "").strip()
+    text = str(data.get("response") or "").strip()
     if not text:
-        raise AiServiceError("Gemini returned an empty response.", 503)
+        raise AiServiceError("Ollama returned an empty response.", 503)
     return text
 
 

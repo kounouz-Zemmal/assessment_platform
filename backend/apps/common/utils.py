@@ -20,6 +20,7 @@ ATTEMPT_STATUS_MAP = {
     "AUTO_GRADED": "Graded",
     "MANUALLY_GRADED": "Graded",
     "FINALIZED": "Graded",
+    "TIMED_OUT": "Not submitted",
 }
 
 
@@ -133,8 +134,9 @@ def parse_iso_datetime(value) -> Optional[timezone.datetime]:
     return normalize_aware_datetime(parsed)
 
 
-def build_proctor_status(event: Dict, now=None):
+def build_proctor_status(event: Dict, now=None, threshold_seconds: Optional[int] = None):
     now = now or timezone.now()
+    threshold_value = int(threshold_seconds or PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS)
     last_seen = parse_iso_datetime(event.get("lastSeenAt"))
     away_since = parse_iso_datetime(event.get("awaySince"))
     outside_seconds = int(event.get("outsideDurationSeconds") or 0)
@@ -143,8 +145,8 @@ def build_proctor_status(event: Dict, now=None):
         outside_seconds = max(outside_seconds, int((now - away_since).total_seconds()))
     stale_seconds = int((now - last_seen).total_seconds()) if last_seen else 10**9
 
-    suspicious = bool(event.get("suspicious")) or outside_seconds >= PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS
-    if stale_seconds >= (PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS + 10):
+    suspicious = bool(event.get("suspicious")) or outside_seconds >= threshold_value
+    if stale_seconds >= (threshold_value + 10):
         suspicious = True
 
     return {

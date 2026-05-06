@@ -19,12 +19,15 @@ export default function TeacherSubmissions() {
       submissionId: string;
       studentId: string;
       studentName: string;
-      status: "Not Started" | "In Progress" | "Submitted" | "Graded";
+      status: "Not Started" | "In Progress" | "Submitted" | "Graded" | "Not submitted";
+      submissionMode?: "submitted" | "auto-submitted";
       score: number | null;
       maxScore: number;
       submittedAt: string | null;
+      proctoring?: { leaveCount: number; totalOutsideSeconds: number };
     }>
   >([]);
+  const [thresholdSeconds, setThresholdSeconds] = useState<number>(10);
 
   const getActionState = (submission: {
     status: string;
@@ -32,12 +35,14 @@ export default function TeacherSubmissions() {
     score: number | null;
   }) => {
     const normalizedStatus = submission.status.trim().toLowerCase();
+    const isNotSubmittedTimedOut = normalizedStatus === "not submitted";
     const isGraded = normalizedStatus === "graded";
     const isSubmitted =
-      normalizedStatus === "submitted" ||
-      !!submission.submittedAt ||
-      submission.score !== null;
-    return { isGraded, isSubmitted };
+      !isNotSubmittedTimedOut &&
+      (normalizedStatus === "submitted" ||
+        !!submission.submittedAt ||
+        submission.score !== null);
+    return { isGraded, isSubmitted, isNotSubmittedTimedOut };
   };
 
   useEffect(() => {
@@ -49,21 +54,28 @@ export default function TeacherSubmissions() {
         submissionId: string;
         studentId: string;
         studentName: string;
-        status: "Not Started" | "In Progress" | "Submitted" | "Graded";
+        status: "Not Started" | "In Progress" | "Submitted" | "Graded" | "Not submitted";
+        submissionMode?: "submitted" | "auto-submitted";
         score: number | null;
         maxScore: number;
         submittedAt: string | null;
+        proctoring?: { leaveCount: number; totalOutsideSeconds: number };
       }>;
+      thresholdSeconds?: number;
     }>(`teacher/assessments/${id}/submissions`)
       .then((data) => {
         setBlockedMessage(null);
         setAssessment(data.assessment);
         setSubmissionRows(data.rows);
+        setThresholdSeconds(Number(data.thresholdSeconds || 10));
       })
       .catch((error) => {
         const message =
           error instanceof Error ? error.message : "Failed to load submissions";
-        if (message.includes("only available after the assessment is published")) {
+        if (
+          message.includes("only available after the assessment is published") ||
+          message.includes("Submissions are available after")
+        ) {
           setAssessment(null);
           setSubmissionRows([]);
           setBlockedMessage(message);
@@ -141,12 +153,14 @@ export default function TeacherSubmissions() {
                   <TableHead>Status</TableHead>
                   <TableHead>Score</TableHead>
                   <TableHead>Submitted At</TableHead>
+                  <TableHead>Mode</TableHead>
+                  <TableHead>Tab Activity</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {submissionRows.map((submission) => {
-                  const { isGraded, isSubmitted } = getActionState(submission);
+                  const { isGraded, isSubmitted, isNotSubmittedTimedOut } = getActionState(submission);
                   const canOpenDetails = !submission.submissionId.startsWith("pending-");
                   return (
                     <TableRow key={submission.submissionId}>
@@ -176,6 +190,24 @@ export default function TeacherSubmissions() {
                           ? new Date(submission.submittedAt).toLocaleString()
                           : "—"}
                       </TableCell>
+                      <TableCell>
+                        {submission.submissionMode === "auto-submitted" ? (
+                          <span className="text-amber-700 font-medium">Auto-submitted</span>
+                        ) : submission.submissionMode === "submitted" ? (
+                          <span className="text-gray-700">Submitted</span>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {submission.proctoring
+                          ? `${submission.proctoring.leaveCount} leaves / ${submission.proctoring.totalOutsideSeconds}s outside${
+                              submission.proctoring.totalOutsideSeconds >= thresholdSeconds
+                                ? " (suspicious)"
+                                : ""
+                            }`
+                          : "—"}
+                      </TableCell>
                       <TableCell className="text-right">
                         {!isGraded && isSubmitted && canOpenDetails && (
                           <Button
@@ -194,7 +226,10 @@ export default function TeacherSubmissions() {
                             View
                           </Button>
                         )}
-                        {!isSubmitted && (
+                        {isNotSubmittedTimedOut && (
+                          <span className="text-sm text-amber-800">Time expired — not submitted</span>
+                        )}
+                        {!isSubmitted && !isNotSubmittedTimedOut && (
                           <span className="text-sm text-gray-500">Awaiting submission</span>
                         )}
                       </TableCell>

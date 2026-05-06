@@ -7,7 +7,8 @@ import { Button } from "../../components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Badge } from "../../components/ui/badge";
-import { apiGet } from "../../apiClient";
+import { apiGet, apiPost } from "../../apiClient";
+import { listOutbox, removeOutboxItem, clearDraft, clearSessionState } from "../../services/examPersistence";
 import { useAuth } from "../../contexts/AuthContext";
 import { toast } from "sonner";
 
@@ -26,6 +27,28 @@ export default function StudentAssessments() {
     try {
       const data = await apiGet<{ assessments: any[]; notifications?: any[] }>("student/assessments");
       setItems(data.assessments || []);
+      let refetchAfterOutbox = false;
+      try {
+        const ob = await listOutbox();
+        for (const row of ob) {
+          if (row.kind !== "timed_out") continue;
+          try {
+            await apiPost(`student/assessments/${row.assessmentId}/attempt/timed-out`, { answers: row.answers });
+            await removeOutboxItem(row.key);
+            clearDraft(row.assessmentId);
+            await clearSessionState(row.assessmentId);
+            refetchAfterOutbox = true;
+          } catch {
+            // Retry on next refresh
+          }
+        }
+      } catch {
+        // IndexedDB unavailable — skip
+      }
+      if (refetchAfterOutbox) {
+        const again = await apiGet<{ assessments: any[]; notifications?: any[] }>("student/assessments");
+        setItems(again.assessments || []);
+      }
       const nextNotifications = data.notifications || [];
       // Show availability notifications only on first visible load,
       // not on every background poll/focus refresh.
@@ -73,8 +96,11 @@ export default function StudentAssessments() {
   );
 
   const nowMs = Date.now();
+  const timedOutAssessments = filteredAssessments.filter((assessment) => assessment.timedOutWithoutSubmission);
+
   const missingAssessments = filteredAssessments
     .filter((assessment) => {
+      if (assessment.timedOutWithoutSubmission) return false;
       if (assessment.hasSubmission) return false;
       if (!assessment.endTime) return false;
       const endMs = new Date(assessment.endTime).getTime();
@@ -89,6 +115,7 @@ export default function StudentAssessments() {
 
   const upcomingAssessments = filteredAssessments
     .filter((assessment) => {
+      if (assessment.timedOutWithoutSubmission) return false;
       if (assessment.hasSubmission) return false;
       if (!assessment.endTime) return true;
       const endMs = new Date(assessment.endTime).getTime();
@@ -102,7 +129,7 @@ export default function StudentAssessments() {
     });
 
   const completedAssessments = filteredAssessments
-    .filter((assessment) => assessment.hasSubmission)
+    .filter((assessment) => assessment.hasSubmission && !assessment.timedOutWithoutSubmission)
     .sort((a, b) => {
       const aTime = a.startTime ? new Date(a.startTime).getTime() : 0;
       const bTime = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -111,6 +138,7 @@ export default function StudentAssessments() {
 
   const renderAssessmentCard = (assessment: any) => {
     const canStart = Boolean(assessment.canStart);
+    const timedOut = Boolean(assessment.timedOutWithoutSubmission);
 
     return (
       <Card key={assessment.id} className="hover:shadow-md transition-shadow">
@@ -155,6 +183,15 @@ export default function StudentAssessments() {
             )}
           </div>
 
+          {timedOut && (
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+              <p className="text-sm text-amber-950">
+                Status: <StatusBadge status="Not submitted" /> — time ended; your instructor did not enable auto-submit,
+                so this is not an “in progress” attempt.
+              </p>
+            </div>
+          )}
+
           {assessment.hasSubmission && (
             <div className="mb-4 p-3 bg-blue-50 rounded-lg">
               <p className="text-sm text-gray-700">
@@ -181,9 +218,14 @@ export default function StudentAssessments() {
                 View Results
               </Button>
             )}
-            {!canStart && !assessment.hasSubmission && (
+            {!canStart && !assessment.hasSubmission && !timedOut && (
               <Button variant="outline" className="flex-1" disabled>
                 Coming
+              </Button>
+            )}
+            {timedOut && (
+              <Button variant="outline" className="flex-1" disabled>
+                Attempt closed
               </Button>
             )}
           </div>
@@ -226,6 +268,9 @@ export default function StudentAssessments() {
           <TabsTrigger value="upcoming">
             Upcoming ({upcomingAssessments.length})
           </TabsTrigger>
+          <TabsTrigger value="notSubmitted">
+            Not submitted ({timedOutAssessments.length})
+          </TabsTrigger>
           <TabsTrigger value="missing">
             Missing ({missingAssessments.length})
           </TabsTrigger>
@@ -233,6 +278,20 @@ export default function StudentAssessments() {
             Completed ({completedAssessments.length})
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="notSubmitted" className="space-y-6">
+          {timedOutAssessments.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center">
+                <p className="text-gray-500">No timed-out attempts without submission</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {timedOutAssessments.map(renderAssessmentCard)}
+            </div>
+          )}
+        </TabsContent>
 
         <TabsContent value="upcoming" className="space-y-6">
           {upcomingAssessments.length === 0 ? (

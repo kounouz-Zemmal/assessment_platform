@@ -273,7 +273,7 @@ export default function TeacherAssessments() {
                     <SelectItem value="Draft">Draft</SelectItem>
                     <SelectItem value="Scheduled">Scheduled</SelectItem>
                     <SelectItem value="Active">Active</SelectItem>
-                    <SelectItem value="Closed">Closed</SelectItem>
+                    <SelectItem value="Closed">Completed</SelectItem>
                     <SelectItem value="Published">Published</SelectItem>
                   </SelectContent>
                 </Select>

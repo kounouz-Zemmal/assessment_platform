@@ -63,12 +63,34 @@ function buildUrl(path: string, params?: QueryParams): string {
   return urlString;
 }
 
+/** Use when showing errors to students (e.g. exam expiry) — hides raw "HTML instead of JSON" dev text. */
+export function studentFriendlyApiMessage(error: unknown, shortMessage: string): string {
+  const msg = error instanceof Error ? error.message : String(error || "");
+  if (/html instead of json|invalid json response|server returned html/i.test(msg)) {
+    return shortMessage;
+  }
+  if (
+    /sql_patches|timed_out update|could not record timed|database may need|timed_out_not_saved/i.test(
+      msg,
+    )
+  ) {
+    return shortMessage;
+  }
+  return msg.trim() || shortMessage;
+}
+
 async function parseJsonResponse(response: Response) {
   const text = await response.text();
   if (!text) return null;
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
   try {
-    return JSON.parse(text);
+    return JSON.parse(trimmed);
   } catch {
+    if (/^\s*</.test(trimmed)) {
+      throw new Error(
+        "Server returned HTML instead of JSON (session expired, proxy error, or server crash). Check login and backend logs.",
+      );
+    }
     throw new Error("Invalid JSON response from server");
   }
 }

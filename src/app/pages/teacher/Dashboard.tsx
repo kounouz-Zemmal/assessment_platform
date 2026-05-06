@@ -302,17 +302,21 @@ export default function TeacherDashboard() {
       assessmentTitle: string;
       moduleCode: string;
       activeStudentsCount: number;
+      submittedStudentsCount?: number;
       thresholdSeconds: number;
       rows: Array<{
+        attemptId?: string;
         studentId: string;
         studentName: string;
         studentEmail: string;
-        statusColor: "green" | "red";
+        participationPhase?: "active" | "submitted";
+        statusColor: "green" | "red" | "blue";
         isSuspicious: boolean;
         outsideDurationSeconds: number;
         staleSeconds: number;
         currentQuestionIndex: number;
         visibilityState: string;
+        submittedAt?: string | null;
       }>;
     }>;
   } | null>(null);
@@ -628,41 +632,52 @@ export default function TeacherDashboard() {
           {!loading && (dashboardData?.liveProctoring || []).map((block) => (
             <div key={block.assessmentId} style={{ marginBottom: 16 }}>
               <p style={{ margin: "0 0 8px", fontSize: 13, color: "#374151", fontWeight: 600 }}>
-                {block.assessmentTitle} ({block.moduleCode}) - {block.activeStudentsCount} active
+                {block.assessmentTitle} ({block.moduleCode}) — {block.activeStudentsCount} in progress ·{" "}
+                {block.submittedStudentsCount ??
+                  block.rows.filter((r) => r.participationPhase === "submitted" || r.statusColor === "blue")
+                    .length}{" "}
+                submitted
               </p>
               {block.rows.length === 0 ? (
                 <div className="td-empty" style={{ padding: "12px 0" }}>No students currently taking this assessment.</div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {block.rows.map((row) => (
-                    <div
-                      key={`${block.assessmentId}-${row.studentId}`}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 12,
-                        border: "1px solid #e5e7eb",
-                        borderRadius: 10,
-                        padding: "10px 12px",
-                        background: row.isSuspicious ? "#fef2f2" : "#f0fdf4",
-                      }}
-                      className={row.isSuspicious ? "td-danger-blink" : ""}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#111827" }}>{row.studentName}</p>
-                        <p style={{ margin: "3px 0 0", fontSize: 12, color: "#6b7280" }}>{row.studentEmail}</p>
+                  {block.rows.map((row) => {
+                    const submitted = row.participationPhase === "submitted" || row.statusColor === "blue";
+                    const suspicious = !submitted && row.isSuspicious;
+                    const rowBg = suspicious ? "#fef2f2" : submitted ? "#eff6ff" : "#f0fdf4";
+                    const statusLabel = submitted ? "Submitted" : suspicious ? "Suspicious" : "Active";
+                    const dotColor = submitted ? "#2563eb" : suspicious ? "#dc2626" : "#16a34a";
+                    return (
+                      <div
+                        key={`${block.assessmentId}-${row.attemptId ?? row.studentId}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 10,
+                          padding: "10px 12px",
+                          background: rowBg,
+                        }}
+                        className={suspicious ? "td-danger-blink" : ""}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#111827" }}>{row.studentName}</p>
+                          <p style={{ margin: "3px 0 0", fontSize: 12, color: "#6b7280" }}>{row.studentEmail}</p>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12, color: "#374151" }}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <Circle size={12} fill={dotColor} color={dotColor} />
+                            {statusLabel}
+                          </span>
+                          {!submitted && <span>Outside: {row.outsideDurationSeconds}s</span>}
+                          {!submitted && <span>Q{Math.max(1, row.currentQuestionIndex + 1)}</span>}
+                        </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12, color: "#374151" }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                          <Circle size={12} fill={row.statusColor === "red" ? "#dc2626" : "#16a34a"} color={row.statusColor === "red" ? "#dc2626" : "#16a34a"} />
-                          {row.statusColor === "red" ? "Suspicious" : "Normal"}
-                        </span>
-                        <span>Outside: {row.outsideDurationSeconds}s</span>
-                        <span>Q{Math.max(1, row.currentQuestionIndex + 1)}</span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

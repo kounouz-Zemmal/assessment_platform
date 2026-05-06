@@ -13,15 +13,22 @@ export default function StudentExamInstructions() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [assessment, setAssessment] = useState<any | null>(null);
+  const [timedOutWithoutSubmission, setTimedOutWithoutSubmission] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!id) return;
     setLoading(true);
-    apiGet<{ assessment: any }>(`student/assessments/${id}/instructions`)
-      .then((data) => setAssessment(data.assessment))
-      .catch(() => setAssessment(null))
+    apiGet<{ assessment: any; timedOutWithoutSubmission?: boolean }>(`student/assessments/${id}/instructions`)
+      .then((data) => {
+        setAssessment(data.assessment);
+        setTimedOutWithoutSubmission(Boolean(data.timedOutWithoutSubmission));
+      })
+      .catch(() => {
+        setAssessment(null);
+        setTimedOutWithoutSubmission(false);
+      })
       .finally(() => setLoading(false));
   }, [id]);
 
@@ -43,6 +50,11 @@ export default function StudentExamInstructions() {
         navigate(`/student/assessments/${id}/results`);
         return;
       }
+      if (message.includes("time ended") || message.includes("without a submission")) {
+        toast.warning(message);
+        navigate("/student/assessments");
+        return;
+      }
       toast.error(message);
     }
   };
@@ -56,6 +68,17 @@ export default function StudentExamInstructions() {
             <p className="text-gray-500">{assessment.moduleCode} - {assessment.moduleName}</p>
           </CardHeader>
           <CardContent className="space-y-6">
+            {timedOutWithoutSubmission && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>
+                  Your time for this assessment ended before you chose to submit. Your instructor set this exam{" "}
+                  <strong>not</strong> to submit automatically when time runs out, so this counts as{" "}
+                  <strong>not submitted</strong> — not “in progress.” You cannot continue the exam. Open{" "}
+                  <strong>My Assessments</strong> to review the status there.
+                </AlertDescription>
+              </Alert>
+            )}
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
@@ -115,7 +138,7 @@ export default function StudentExamInstructions() {
                   <span>
                     {assessment.autoSubmitOnTimeout !== false
                       ? "If time runs out, your assessment will be automatically submitted."
-                      : "When time runs out, you will no longer be able to change your answers."}
+                      : "When time runs out, the exam closes, your instructor will see this attempt as not submitted (not “in progress”), and you’ll be taken straight to My Assessments."}
                   </span>
                 </li>
                 <li className="flex gap-2">
@@ -157,7 +180,7 @@ export default function StudentExamInstructions() {
                   Tab switching:{" "}
                   <span className="font-medium">
                     {assessment.tabSwitchWarning
-                      ? "Tab/window switching may trigger a warning"
+                      ? `Tab/window switching may trigger a warning (threshold: ${Number(assessment.tabSwitchThresholdSeconds ?? 10)}s)`
                       : "No tab-switch warnings configured"}
                   </span>
                 </li>
@@ -188,11 +211,11 @@ export default function StudentExamInstructions() {
                 onClick={() => navigate("/student/assessments")}
                 className="flex-1"
               >
-                Cancel
+                {timedOutWithoutSubmission ? "Back to My Assessments" : "Cancel"}
               </Button>
               <Button
                 onClick={handleStartExam}
-                disabled={!confirmed}
+                disabled={!confirmed || timedOutWithoutSubmission}
                 className="flex-1"
               >
                 Start Assessment

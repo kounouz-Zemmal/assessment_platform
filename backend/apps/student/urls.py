@@ -36,6 +36,11 @@ urlpatterns = [
         views.student_attempt_submit,
         name="student-attempt-submit",
     ),
+    path(
+        "student/assessments/<int:assessment_id>/attempt/timed-out",
+        views.student_attempt_timed_out,
+        name="student-attempt-timed-out",
+    ),
     path("student/history", views.student_history, name="student-history"),
     path(
         "student/results/<int:assessment_id>",

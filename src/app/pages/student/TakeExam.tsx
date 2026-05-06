@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { AlertCircle } from "lucide-react";
 import { Button } from "../../components/ui/button";
@@ -10,7 +10,7 @@ import { Badge } from "../../components/ui/badge";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../../components/ui/alert-dialog";
 import { ExamTimer } from "../../components/ExamTimer";
 import { toast } from "sonner";
-import { apiGet, apiPatch, apiPost } from "../../apiClient";
+import { apiGet, apiPatch, apiPost, studentFriendlyApiMessage } from "../../apiClient";
 import {
   clearDraft,
   clearSessionState,
@@ -43,7 +43,12 @@ export default function StudentTakeExam() {
   const [submitting, setSubmitting] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isTimedOut, setIsTimedOut] = useState(false);
+  const [proctorAlert, setProctorAlert] = useState(false);
   const hiddenStartedAtRef = useRef<number | null>(null);
+  const examExpiryHandledRef = useRef(false);
+  const expireExamRef = useRef<() => void>(() => {});
+  const payloadRef = useRef<typeof payload>(null);
+  const answersRef = useRef<Record<string, string>>({});
   const assessment = payload?.assessment;
   const assessmentQuestions = payload?.questions || [];
   const configuredDurationSeconds = Number(assessment?.duration ?? 0) * 60;
@@ -60,6 +65,9 @@ export default function StudentTakeExam() {
         outsideDurationSeconds: overrides?.outsideDurationSeconds ?? 0,
         visibilityState: overrides?.visibilityState ?? (document.hidden ? "hidden" : "visible"),
       });
+      const thresholdSeconds = Number(assessment?.tabSwitchThresholdSeconds ?? 10);
+      const outsideSeconds = Number(overrides?.outsideDurationSeconds ?? 0);
+      setProctorAlert(outsideSeconds >= thresholdSeconds);
     } catch {
       // Keep exam flow uninterrupted if proctoring telemetry fails.
     }
@@ -148,6 +156,7 @@ export default function StudentTakeExam() {
     if (!navigator.onLine || !id) return;
     setSyncStatus("syncing");
     let submitSynced = false;
+    let timedOutSynced = false;
     const items = await listOutbox();
     for (const item of items.filter((row) => row.assessmentId === id)) {
       try {
@@ -155,10 +164,16 @@ export default function StudentTakeExam() {
           await apiPost(`student/assessments/${id}/attempt/submit`, {
             answers: item.answers,
             autoSubmitted: item.autoSubmitted,
+            submittedAt: item.submittedAt ?? item.updatedAt,
           });
           clearDraft(id);
           await clearSessionState(id);
           submitSynced = true;
+        } else if (item.kind === "timed_out") {
+          await apiPost(`student/assessments/${id}/attempt/timed-out`, { answers: item.answers });
+          clearDraft(id);
+          await clearSessionState(id);
+          timedOutSynced = true;
         } else {
           await apiPatch(`student/assessments/${id}/attempt/save`, { answers: item.answers });
         }
@@ -172,6 +187,9 @@ export default function StudentTakeExam() {
     if (submitSynced) {
       toast.success("Assessment submitted automatically after reconnection.");
       navigate(`/student/assessments/${id}/results`, { replace: true });
+    } else if (timedOutSynced) {
+      toast.info("Time expiry recorded after reconnection. You were not auto-submitted.");
+      navigate("/student/assessments", { replace: true });
     }
   };
 
@@ -221,24 +239,134 @@ export default function StudentTakeExam() {
   }, [id]);
 
   useEffect(() => {
-    const attemptStatus = String(payload?.attempt?.status || "").toUpperCase();
-    if (!attemptStatus) return;
+    const raw = String(payload?.attempt?.status || "").trim();
+    const upper = raw.toUpperCase();
+    if (!upper) return;
     // Backend may return either enum-style (IN_PROGRESS) or label-style (In Progress).
-    if (attemptStatus === "IN_PROGRESS" || attemptStatus === "IN PROGRESS") return;
-    if (attemptStatus === "SUBMITTED" || attemptStatus === "AUTO_GRADED" || attemptStatus === "MANUALLY_GRADED" || attemptStatus === "FINALIZED" || attemptStatus === "GRADED") {
+    if (upper === "IN_PROGRESS" || upper === "IN PROGRESS") return;
+    if (upper === "NOT SUBMITTED" || raw === "Not submitted") {
+      navigate("/student/assessments", { replace: true });
+      return;
+    }
+    if (
+      upper === "SUBMITTED" ||
+      upper === "AUTO_GRADED" ||
+      upper === "MANUALLY_GRADED" ||
+      upper === "FINALIZED" ||
+      upper === "GRADED"
+    ) {
       navigate(`/student/assessments/${id}/results`, { replace: true });
       return;
     }
-  }, [payload?.attempt?.status, navigate]);
+  }, [payload?.attempt?.status, navigate, id]);
+
+  useEffect(() => {
+    examExpiryHandledRef.current = false;
+  }, [id, examClock?.startedAtMs, examClock?.durationSeconds]);
+
+  payloadRef.current = payload;
+  answersRef.current = answers;
+
+  useLayoutEffect(() => {
+    expireExamRef.current = () => {
+      if (examExpiryHandledRef.current) return;
+      const asm = payloadRef.current?.assessment;
+      if (!asm || !id) return;
+
+      examExpiryHandledRef.current = true;
+      setIsLocked(true);
+
+      if (asm.autoSubmitOnTimeout !== false) {
+        setIsTimedOut(false);
+        void (async () => {
+          try {
+            if (!navigator.onLine) {
+              await enqueueOutbox({
+                assessmentId: id,
+                kind: "submit",
+                answers: answersRef.current,
+                autoSubmitted: true,
+                submittedAt: new Date().toISOString(),
+              });
+              toast.info("Submission queued locally. It will auto-sync when connection is restored.");
+              clearDraft(id);
+              await clearSessionState(id);
+              navigate("/student/assessments", { replace: true });
+              return;
+            }
+            await apiPost(`student/assessments/${id}/attempt/submit`, {
+              answers: answersRef.current,
+              autoSubmitted: true,
+              submittedAt: new Date().toISOString(),
+            });
+            clearDraft(id);
+            await clearSessionState(id);
+            toast.success("Assessment submitted successfully!");
+            navigate(`/student/assessments/${id}/results`, { replace: true });
+          } catch (error) {
+            const message = studentFriendlyApiMessage(
+              error,
+              "Time is over. Your exam was not submitted. Returning to My Assessments.",
+            );
+            const networkLikeError =
+              !navigator.onLine ||
+              message.toLowerCase().includes("failed to fetch") ||
+              message.toLowerCase().includes("network");
+            if (networkLikeError) {
+              await enqueueOutbox({
+                assessmentId: id,
+                kind: "submit",
+                answers: answersRef.current,
+                autoSubmitted: true,
+                submittedAt: new Date().toISOString(),
+              });
+              toast.info("Submission queued. Returning to My Assessments.");
+            } else {
+              toast.error(message);
+            }
+            clearDraft(id);
+            await clearSessionState(id);
+            navigate("/student/assessments", { replace: true });
+          }
+        })();
+        return;
+      }
+
+      setIsTimedOut(true);
+      void (async () => {
+        const notSubmittedMsg =
+          "Time has ended. Your instructor turned off automatic submit when time runs out, so this attempt counts as not submitted. Taking you to My Assessments.";
+        try {
+          if (navigator.onLine) {
+            // Single request: timed-out endpoint already persists answers (no separate save).
+            await apiPost(`student/assessments/${id}/attempt/timed-out`, { answers: answersRef.current });
+          } else {
+            await enqueueOutbox({ assessmentId: id, kind: "timed_out", answers: answersRef.current });
+          }
+          toast.warning(notSubmittedMsg, { duration: 9000 });
+        } catch (error) {
+          toast.warning(studentFriendlyApiMessage(error, notSubmittedMsg), { duration: 9000 });
+        } finally {
+          clearDraft(id);
+          await clearSessionState(id);
+          navigate("/student/assessments", { replace: true });
+        }
+      })();
+    };
+  }, [id, navigate]);
 
   useEffect(() => {
     if (!examClock) return;
-    const updateRemaining = () => {
+    const tick = () => {
       const elapsedSeconds = Math.floor((Date.now() - examClock.startedAtMs) / 1000);
-      setRemainingSeconds(Math.max(0, examClock.durationSeconds - elapsedSeconds));
+      const next = Math.max(0, examClock.durationSeconds - elapsedSeconds);
+      setRemainingSeconds(next);
+      if (next <= 0 && payloadRef.current?.assessment && !examExpiryHandledRef.current) {
+        expireExamRef.current();
+      }
     };
-    updateRemaining();
-    const interval = setInterval(updateRemaining, 1000);
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
   }, [examClock]);
 
@@ -486,12 +614,22 @@ export default function StudentTakeExam() {
     setSubmitting(true);
     try {
       if (!navigator.onLine) {
-        await enqueueOutbox({ assessmentId: id, kind: "submit", answers, autoSubmitted });
+        await enqueueOutbox({
+          assessmentId: id,
+          kind: "submit",
+          answers,
+          autoSubmitted,
+          submittedAt: new Date().toISOString(),
+        });
         toast.info("Submission queued locally. It will auto-sync when connection is restored.");
         setSubmitting(false);
         return;
       } else {
-        await apiPost(`student/assessments/${id}/attempt/submit`, { answers, autoSubmitted });
+        await apiPost(`student/assessments/${id}/attempt/submit`, {
+          answers,
+          autoSubmitted,
+          submittedAt: new Date().toISOString(),
+        });
         clearDraft(id);
         await clearSessionState(id);
       }
@@ -502,7 +640,13 @@ export default function StudentTakeExam() {
         message.toLowerCase().includes("failed to fetch") ||
         message.toLowerCase().includes("network");
       if (networkLikeError) {
-        await enqueueOutbox({ assessmentId: id, kind: "submit", answers, autoSubmitted });
+        await enqueueOutbox({
+          assessmentId: id,
+          kind: "submit",
+          answers,
+          autoSubmitted,
+          submittedAt: new Date().toISOString(),
+        });
         toast.info("Submission queued due to connectivity issue. You can continue on this page.");
       } else {
         toast.error(message);
@@ -513,13 +657,6 @@ export default function StudentTakeExam() {
     toast.success("Assessment submitted successfully!");
     setSubmitting(false);
     navigate(`/student/assessments/${id}/results`, { replace: true });
-  };
-
-  const handleTimeUp = () => {
-    setIsLocked(true);
-    setIsTimedOut(true);
-    toast.error("Time's up! Exam not submitted.");
-    navigate("/student/assessments", { replace: true });
   };
 
   const answeredCount = Object.keys(answers).length;
@@ -537,6 +674,11 @@ export default function StudentTakeExam() {
                 ? (syncStatus === "syncing" ? "Connection restored. Syncing..." : "Online")
                 : "You are offline. Your progress is stored locally."}
             </p>
+            {proctorAlert && (
+              <p className="text-xs mt-1 text-red-600 font-medium">
+                Alert: suspicious tab-switch duration detected.
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-4">
             <div className="text-sm text-gray-500">
@@ -546,7 +688,7 @@ export default function StudentTakeExam() {
               remainingSeconds={remainingSeconds}
               totalSeconds={configuredDurationSeconds > 0 ? configuredDurationSeconds : null}
               paused={isLocked}
-              onTimeUp={handleTimeUp}
+              onTimeUp={() => expireExamRef.current()}
             />
             {assessment?.perQuestionTimerEnabled &&
               questionRemainingSeconds !== null && (

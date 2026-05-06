@@ -79,11 +79,13 @@ export default function TeacherCreateAssessment() {
     endDate: "",
     endTime: "",
     selectedQuestions: [] as string[],
+    selectedTopicFilterId: "all",
     randomize: false,
     instructions: "",
     shuffleAnswers: true,
     autoSubmitOnTimeout: true,
     tabSwitchWarning: false,
+    tabSwitchThresholdSeconds: "10",
   });
 
   useEffect(() => {
@@ -122,6 +124,7 @@ export default function TeacherCreateAssessment() {
         shuffleAnswers?: boolean;
         autoSubmitOnTimeout?: boolean;
         tabSwitchWarning?: boolean;
+        tabSwitchThresholdSeconds?: number;
       };
     }>(`teacher/assessments/${id}`)
       .then((data) => {
@@ -143,11 +146,15 @@ export default function TeacherCreateAssessment() {
             ? formatLocalHm(new Date(assessment.endTime))
             : "",
           selectedQuestions: assessment.questions || [],
+          selectedTopicFilterId: "all",
           randomize: assessment.randomize || false,
           instructions: assessment.instructions || "",
           shuffleAnswers: assessment.shuffleAnswers ?? true,
           autoSubmitOnTimeout: assessment.autoSubmitOnTimeout ?? true,
           tabSwitchWarning: assessment.tabSwitchWarning ?? false,
+          tabSwitchThresholdSeconds: String(
+            Math.max(1, Number(assessment.tabSwitchThresholdSeconds ?? 10)),
+          ),
         });
       })
       .catch((error) => {
@@ -228,7 +235,7 @@ export default function TeacherCreateAssessment() {
     }
     
     if (!formData.title || !formData.moduleId || formData.selectedQuestions.length === 0) {
-      toast.error("Please fill in all required fields and select at least one question");
+      toast.error("Please fill in required fields and select at least one question");
       return;
     }
 
@@ -261,6 +268,7 @@ export default function TeacherCreateAssessment() {
         shuffleAnswers: formData.shuffleAnswers,
         autoSubmitOnTimeout: formData.autoSubmitOnTimeout,
         tabSwitchWarning: formData.tabSwitchWarning,
+        tabSwitchThresholdSeconds: Math.max(1, Number(formData.tabSwitchThresholdSeconds) || 10),
       };
 
       if (isEditing && id) {
@@ -321,7 +329,14 @@ export default function TeacherCreateAssessment() {
               <Label htmlFor="module">Module *</Label>
               <Select
                 value={formData.moduleId}
-                onValueChange={(value) => setFormData({ ...formData, moduleId: value, selectedQuestions: [] })}
+                onValueChange={(value) =>
+                  setFormData({
+                    ...formData,
+                    moduleId: value,
+                    selectedQuestions: [],
+                    selectedTopicFilterId: "all",
+                  })
+                }
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select module" />
@@ -446,17 +461,25 @@ export default function TeacherCreateAssessment() {
                   Shuffle answer options for each student
                 </Label>
               </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="autoSubmitOnTimeout"
-                  checked={formData.autoSubmitOnTimeout}
-                  onCheckedChange={(checked) =>
-                    setFormData({ ...formData, autoSubmitOnTimeout: checked as boolean })
+              <div className="space-y-2">
+                <Label htmlFor="timeoutBehavior">When exam time ends</Label>
+                <Select
+                  value={formData.autoSubmitOnTimeout ? "auto_submit" : "no_auto_submit"}
+                  onValueChange={(value) =>
+                    setFormData({
+                      ...formData,
+                      autoSubmitOnTimeout: value === "auto_submit",
+                    })
                   }
-                />
-                <Label htmlFor="autoSubmitOnTimeout" className="cursor-pointer">
-                  Automatically submit when time runs out
-                </Label>
+                >
+                  <SelectTrigger id="timeoutBehavior">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto_submit">Auto-submit exam</SelectItem>
+                    <SelectItem value="no_auto_submit">Do NOT submit automatically</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="flex items-center space-x-2">
                 <Checkbox
@@ -469,6 +492,26 @@ export default function TeacherCreateAssessment() {
                 <Label htmlFor="tabSwitchWarning" className="cursor-pointer">
                   Show warning when student switches tabs or windows
                 </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="tabSwitchThresholdSeconds">Tab-switch suspicious threshold (seconds)</Label>
+                <Input
+                  id="tabSwitchThresholdSeconds"
+                  type="text"
+                  inputMode="numeric"
+                  value={formData.tabSwitchThresholdSeconds}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      tabSwitchThresholdSeconds: e.target.value.replace(/\D/g, ""),
+                    })
+                  }
+                  onBlur={() => {
+                    const next = Math.max(1, Number(formData.tabSwitchThresholdSeconds) || 10);
+                    setFormData({ ...formData, tabSwitchThresholdSeconds: String(next) });
+                  }}
+                  placeholder="10"
+                />
               </div>
             </div>
           </CardContent>
@@ -489,13 +532,46 @@ export default function TeacherCreateAssessment() {
               <p className="text-center text-gray-500 py-8">
                 Please select a module first
               </p>
-            ) : moduleQuestions.length === 0 ? (
-              <p className="text-center text-gray-500 py-8">
-                No questions available for this module.
-              </p>
             ) : (
-              <div className="space-y-3 max-h-96 overflow-y-auto">
-                {moduleQuestions.map((question) => {
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="topicFilter">Choose topic (within selected module)</Label>
+                  <Select
+                    value={formData.selectedTopicFilterId}
+                    onValueChange={(value) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        selectedTopicFilterId: value,
+                        selectedTopicIds: value === "all" ? prev.selectedTopicIds : [value],
+                      }))
+                    }
+                  >
+                    <SelectTrigger id="topicFilter">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All topics</SelectItem>
+                      {(teacherModules.find((m) => m.id === formData.moduleId)?.topics || []).map((topic) => (
+                        <SelectItem key={topic.id} value={topic.id}>
+                          {topic.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                {moduleQuestions.length === 0 ? (
+                  <p className="text-center text-gray-500 py-6">
+                    No questions available for this module.
+                  </p>
+                ) : moduleQuestions
+                  .filter((question) =>
+                    formData.selectedTopicFilterId === "all"
+                      ? true
+                      : question.topicId === formData.selectedTopicFilterId,
+                  )
+                  .map((question) => {
                   const module = teacherModules.find((m) => m.id === question.moduleId);
                   const topic = module?.topics.find((t) => t.id === question.topicId);
                   
@@ -525,6 +601,43 @@ export default function TeacherCreateAssessment() {
                     </div>
                   );
                 })}
+                {moduleQuestions.length > 0 &&
+                  moduleQuestions.filter((question) =>
+                    formData.selectedTopicFilterId === "all"
+                      ? true
+                      : question.topicId === formData.selectedTopicFilterId,
+                  ).length === 0 && (
+                    <p className="text-center text-gray-500 py-6">
+                      No questions match the selected topic filter.
+                    </p>
+                  )}
+                </div>
+
+                {formData.selectedQuestions.length > 0 && (
+                  <div className="pt-2 border-t">
+                    <Label className="text-sm">Selected questions for this assessment</Label>
+                    <div className="mt-2 space-y-2">
+                      {formData.selectedQuestions.map((selectedId, idx) => {
+                        const question = moduleQuestions.find((item) => item.id === selectedId);
+                        return (
+                          <div key={selectedId} className="flex items-center justify-between rounded border px-3 py-2">
+                            <p className="text-sm text-gray-800">
+                              {idx + 1}. {question?.text || `Question #${selectedId}`}
+                            </p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => toggleQuestion(selectedId)}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

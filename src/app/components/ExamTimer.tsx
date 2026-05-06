@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "../components/ui/card";
 import { Clock } from "lucide-react";
 
@@ -10,9 +10,17 @@ interface ExamTimerProps {
 }
 
 export function ExamTimer({ remainingSeconds, totalSeconds = null, onTimeUp, paused = false }: ExamTimerProps) {
+  const timeUpFiredRef = useRef(false);
+
   useEffect(() => {
     if (remainingSeconds === null) return;
-    if (!paused && remainingSeconds <= 0) {
+    if (remainingSeconds > 0) {
+      timeUpFiredRef.current = false;
+      return;
+    }
+    if (paused) return;
+    if (!timeUpFiredRef.current) {
+      timeUpFiredRef.current = true;
       onTimeUp();
     }
   }, [paused, remainingSeconds, onTimeUp]);

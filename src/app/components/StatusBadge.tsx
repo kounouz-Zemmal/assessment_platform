@@ -18,6 +18,7 @@ export function StatusBadge({ status }: StatusBadgeProps) {
     Published: { variant: "default", className: "bg-purple-500 hover:bg-purple-600" },
     "Not Started": { variant: "secondary" },
     "In Progress": { variant: "default", className: "bg-yellow-500 hover:bg-yellow-600 text-black" },
+    "Not submitted": { variant: "secondary", className: "bg-amber-100 text-amber-900 border border-amber-300" },
     Submitted: { variant: "default", className: "bg-blue-500 hover:bg-blue-600" },
     Graded: { variant: "default", className: "bg-green-500 hover:bg-green-600" },
     active: { variant: "default", className: "bg-green-500 hover:bg-green-600" },

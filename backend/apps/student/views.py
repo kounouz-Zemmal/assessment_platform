@@ -5,6 +5,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
+from django.db import IntegrityError, connection
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -29,6 +30,7 @@ from apps.common.utils import (
     attempt_status,
     build_proctor_status,
     parse_iso_datetime,
+    PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS,
     proctor_cache_key,
     to_float,
     to_percentage,
@@ -85,8 +87,22 @@ def _student_enrolled_module_ids(student_id):
     )
 
 
-def _attempt_is_final(attempt):
+def _attempt_is_successfully_submitted(attempt):
     return (attempt.status or "").upper() in {"SUBMITTED", "AUTO_GRADED", "MANUALLY_GRADED", "FINALIZED"}
+
+
+def _attempt_is_timed_out(attempt):
+    return (attempt.status or "").upper() == "TIMED_OUT"
+
+
+def _attempt_allows_editing(attempt):
+    """Only in-progress attempts accept saves, proctoring, and submission."""
+    return (attempt.status or "").upper() == "IN_PROGRESS"
+
+
+# Backward-compatible name used across student flows for graded/submitted attempts.
+def _attempt_is_final(attempt):
+    return _attempt_is_successfully_submitted(attempt)
 
 
 def _assessment_open_for_attempt(assessment):
@@ -119,15 +135,16 @@ def _assessment_window(assessment):
     return start_time, end_time
 
 
-def _assessment_can_start(assessment, has_submission):
+def _assessment_can_start(assessment, has_successful_submission, timed_out_without_submission=False):
     now = timezone.now()
     start_time, end_time = _assessment_window(assessment)
     status_value = (assessment.status or "").upper()
     if status_value in {"DRAFT", "CLOSED"}:
         return False
+    if has_successful_submission or timed_out_without_submission:
+        return False
     return (
-        (not has_submission)
-        and (start_time is None or now >= start_time)
+        (start_time is None or now >= start_time)
         and (end_time is None or now <= end_time)
     )
 
@@ -178,6 +195,109 @@ def _normalize_answer_payload(value):
     if isinstance(value, list):
         return ", ".join(str(item).strip() for item in value if str(item).strip())
     return str(value or "").strip()
+
+
+def _ensure_proctoring_tables():
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_proctoring_config (
+                assessment_id BIGINT PRIMARY KEY REFERENCES assessments(id) ON DELETE CASCADE,
+                tab_switch_threshold_seconds INTEGER NOT NULL DEFAULT 10,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proctoring_tab_activity (
+                id BIGSERIAL PRIMARY KEY,
+                assessment_id BIGINT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+                attempt_id BIGINT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+                student_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                switched_at TIMESTAMPTZ NOT NULL,
+                returned_at TIMESTAMPTZ NULL,
+                duration_seconds INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proctor_activity_attempt ON proctoring_tab_activity(attempt_id)"
+        )
+
+
+def _assessment_tab_switch_threshold_seconds(assessment_id: int) -> int:
+    _ensure_proctoring_tables()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT tab_switch_threshold_seconds FROM assessment_proctoring_config WHERE assessment_id = %s",
+            [assessment_id],
+        )
+        row = cursor.fetchone()
+    if not row:
+        return PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS
+    try:
+        value = int(row[0])
+    except (TypeError, ValueError):
+        return PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS
+    return max(1, value)
+
+
+_ATTEMPTS_TIMED_OUT_CONSTRAINT_CACHE_KEY = "ddl:attempts_status_includes_timed_out_v1"
+
+
+def _ensure_attempts_status_allows_timed_out():
+    """
+    Ensure attempts.status accepts TIMED_OUT (PostgreSQL CHECK). Matches sql_patches/
+    001_attempt_status_timed_out.sql so installs do not require a manual DB step.
+    """
+    if connection.vendor != "postgresql":
+        return
+    if cache.get(_ATTEMPTS_TIMED_OUT_CONSTRAINT_CACHE_KEY):
+        return
+    add_sql = """
+        ALTER TABLE attempts ADD CONSTRAINT attempts_status_check CHECK (
+            status::text = ANY (
+                ARRAY[
+                    'IN_PROGRESS'::character varying,
+                    'SUBMITTED'::character varying,
+                    'AUTO_GRADED'::character varying,
+                    'MANUALLY_GRADED'::character varying,
+                    'FINALIZED'::character varying,
+                    'TIMED_OUT'::character varying
+                ]::text[]
+            )
+        );
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE attempts DROP CONSTRAINT IF EXISTS attempts_status_check;")
+            cursor.execute(add_sql)
+        cache.set(_ATTEMPTS_TIMED_OUT_CONSTRAINT_CACHE_KEY, "1", timeout=None)
+        return
+    except Exception:
+        pass
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT c.conname
+                FROM pg_constraint c
+                JOIN pg_class t ON c.conrelid = t.oid
+                WHERE t.relname = 'attempts' AND c.contype = 'c'
+                  AND pg_get_constraintdef(c.oid) ILIKE %s
+                """,
+                ["%status%"],
+            )
+            for row in cursor.fetchall():
+                qn = connection.ops.quote_name(row[0])
+                cursor.execute(f"ALTER TABLE attempts DROP CONSTRAINT IF EXISTS {qn}")
+            cursor.execute(add_sql)
+        cache.set(_ATTEMPTS_TIMED_OUT_CONSTRAINT_CACHE_KEY, "1", timeout=None)
+    except Exception:
+        pass
 
 
 def _grade_objective_answer(question, answer_text):
@@ -359,9 +479,10 @@ def student_assessments(request):
     payload_items = []
     for item in assessments:
         latest_attempt = attempts_by_assessment.get(item.id)
-        has_submission = bool(latest_attempt and _attempt_is_final(latest_attempt))
+        has_submission = bool(latest_attempt and _attempt_is_successfully_submitted(latest_attempt))
+        timed_out_without_submission = bool(latest_attempt and _attempt_is_timed_out(latest_attempt))
         start_time, end_time = _assessment_window(item)
-        can_start = _assessment_can_start(item, has_submission)
+        can_start = _assessment_can_start(item, has_submission, timed_out_without_submission)
 
         if can_start:
             _dispatch_assessment_start_notifications(item)
@@ -388,6 +509,7 @@ def student_assessments(request):
                 "instructions": item.instructions or "",
                 "questionCount": AssessmentQuestion.objects.filter(assessment_id=item.id).count(),
                 "hasSubmission": has_submission,
+                "timedOutWithoutSubmission": timed_out_without_submission,
                 "canStart": can_start,
             }
         )
@@ -426,6 +548,7 @@ def student_assessment_instructions(request, assessment_id):
                 "status": assessment_status(assessment.status),
                 "autoSubmitOnTimeout": bool(assessment.auto_submit),
                 "tabSwitchWarning": bool(assessment.tab_warning),
+                "tabSwitchThresholdSeconds": _assessment_tab_switch_threshold_seconds(assessment.id),
                 "shuffleAnswers": bool(assessment.shuffle_choices),
                 "questionCount": AssessmentQuestion.objects.filter(assessment_id=assessment.id).count(),
             },
@@ -434,8 +557,9 @@ def student_assessment_instructions(request, assessment_id):
                 "status": attempt_status(active_attempt.status),
                 "startTime": active_attempt.start_time.isoformat() if active_attempt.start_time else None,
             }
-            if active_attempt and not _attempt_is_final(active_attempt)
+            if active_attempt and _attempt_allows_editing(active_attempt)
             else None,
+            "timedOutWithoutSubmission": bool(active_attempt and _attempt_is_timed_out(active_attempt)),
         }
     )
 
@@ -489,6 +613,7 @@ def _attempt_detail_payload(attempt, assessment):
             "shuffleAnswers": bool(assessment.shuffle_choices),
             "autoSubmitOnTimeout": bool(assessment.auto_submit),
             "tabSwitchWarning": bool(assessment.tab_warning),
+            "tabSwitchThresholdSeconds": _assessment_tab_switch_threshold_seconds(assessment.id),
             "perQuestionTimerEnabled": False,
             "perQuestionTimeoutBehavior": "next",
         },
@@ -560,9 +685,14 @@ def student_attempt_start(request, assessment_id):
     if not can_open:
         return JsonResponse({"detail": reason or "Assessment is not open"}, status=409)
     existing = Attempt.objects.filter(student_id=student_id, assessment_id=assessment_id).order_by("-attempt_number").first()
-    if existing and _attempt_is_final(existing):
+    if existing and _attempt_is_successfully_submitted(existing):
         return JsonResponse({"detail": "Attempt already submitted"}, status=409)
-    if existing and not _attempt_is_final(existing):
+    if existing and _attempt_is_timed_out(existing):
+        return JsonResponse(
+            {"detail": "Your time ended without a submission for this assessment."},
+            status=409,
+        )
+    if existing and _attempt_allows_editing(existing):
         return JsonResponse(_attempt_detail_payload(existing, assessment))
 
     now = timezone.now()
@@ -597,7 +727,10 @@ def student_attempt_detail(request, assessment_id):
         return JsonResponse({"detail": "Assessment not found"}, status=404)
     if assessment.module_id not in _student_enrolled_module_ids(student_id):
         return JsonResponse({"detail": "Forbidden"}, status=403)
-    return JsonResponse(_attempt_detail_payload(attempt, assessment))
+    payload = _attempt_detail_payload(attempt, assessment)
+    if _attempt_is_timed_out(attempt):
+        payload["questions"] = []
+    return JsonResponse(payload)
 
 
 @csrf_exempt
@@ -617,7 +750,7 @@ def student_attempt_save(request, assessment_id):
         return JsonResponse({"detail": "Attempt not found"}, status=404)
     if attempt.assessment.module_id not in _student_enrolled_module_ids(student_id):
         return JsonResponse({"detail": "Forbidden"}, status=403)
-    if _attempt_is_final(attempt):
+    if not _attempt_allows_editing(attempt):
         return JsonResponse({"detail": "Attempt already finalized"}, status=409)
     try:
         payload = json.loads(request.body.decode("utf-8"))
@@ -644,7 +777,7 @@ def student_attempt_proctoring_event(request, assessment_id):
         return JsonResponse({"detail": "Attempt not found"}, status=404)
     if attempt.assessment.module_id not in _student_enrolled_module_ids(student_id):
         return JsonResponse({"detail": "Forbidden"}, status=403)
-    if _attempt_is_final(attempt):
+    if not _attempt_allows_editing(attempt):
         return JsonResponse({"detail": "Attempt already finalized"}, status=409)
 
     try:
@@ -653,6 +786,7 @@ def student_attempt_proctoring_event(request, assessment_id):
         payload = {}
 
     event_type = str(payload.get("event") or "heartbeat").strip().lower()
+    threshold_seconds = _assessment_tab_switch_threshold_seconds(assessment_id)
     now = timezone.now()
     cache_key = proctor_cache_key(assessment_id, student_id)
     current = cache.get(cache_key) or {}
@@ -667,6 +801,44 @@ def student_attempt_proctoring_event(request, assessment_id):
         outside_duration_seconds = max(outside_duration_seconds, int((now - away_since).total_seconds()))
 
     suspicious_hint = bool(payload.get("suspicious"))
+    active_event_id = int(current.get("activeEventId") or 0)
+    _ensure_proctoring_tables()
+    if event_type == "tab_hidden" and active_event_id <= 0:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO proctoring_tab_activity (
+                    assessment_id, attempt_id, student_id, switched_at, returned_at, duration_seconds, created_at
+                ) VALUES (%s, %s, %s, %s, NULL, 0, %s)
+                RETURNING id
+                """,
+                [assessment_id, attempt.id, student_id, now, now],
+            )
+            inserted = cursor.fetchone()
+            active_event_id = int(inserted[0]) if inserted else 0
+    elif event_type == "tab_visible" and active_event_id > 0:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE proctoring_tab_activity
+                SET returned_at = %s,
+                    duration_seconds = GREATEST(duration_seconds, EXTRACT(EPOCH FROM (%s - switched_at))::INT)
+                WHERE id = %s
+                """,
+                [now, now, active_event_id],
+            )
+        active_event_id = 0
+    elif event_type == "heartbeat" and active_event_id > 0 and away_since:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE proctoring_tab_activity
+                SET duration_seconds = GREATEST(duration_seconds, EXTRACT(EPOCH FROM (%s - switched_at))::INT)
+                WHERE id = %s
+                """,
+                [now, active_event_id],
+            )
+
     status_payload = build_proctor_status(
         {
             "lastSeenAt": now.isoformat(),
@@ -675,6 +847,7 @@ def student_attempt_proctoring_event(request, assessment_id):
             "suspicious": suspicious_hint,
         },
         now=now,
+        threshold_seconds=threshold_seconds,
     )
 
     next_state = {
@@ -689,6 +862,7 @@ def student_attempt_proctoring_event(request, assessment_id):
         "lastSeenAt": now.isoformat(),
         "lastUpdatedAt": now.isoformat(),
         "suspicious": status_payload["isSuspicious"],
+        "activeEventId": active_event_id,
     }
     cache.set(cache_key, next_state, timeout=60 * 30)
 
@@ -701,6 +875,7 @@ def student_attempt_proctoring_event(request, assessment_id):
             "attemptId": str(attempt.id),
             "isSuspicious": status_payload["isSuspicious"],
             "outsideDurationSeconds": status_payload["outsideDurationSeconds"],
+            "thresholdSeconds": threshold_seconds,
         }
     )
 
@@ -722,8 +897,13 @@ def student_attempt_submit(request, assessment_id):
         return JsonResponse({"detail": "Attempt not found"}, status=404)
     if attempt.assessment.module_id not in _student_enrolled_module_ids(student_id):
         return JsonResponse({"detail": "Forbidden"}, status=403)
-    if _attempt_is_final(attempt):
+    if _attempt_is_successfully_submitted(attempt):
         return JsonResponse({"saved": True, "submitted": True, "attemptId": str(attempt.id)})
+    if not _attempt_allows_editing(attempt):
+        return JsonResponse(
+            {"detail": "This attempt cannot be submitted (e.g. time expired without auto-submit)."},
+            status=409,
+        )
 
     try:
         payload = json.loads(request.body.decode("utf-8"))
@@ -791,14 +971,97 @@ def student_attempt_submit(request, assessment_id):
                 )
         total += score
 
+    submitted_at_client = parse_iso_datetime(payload.get("submittedAt"))
+    if submitted_at_client and submitted_at_client > now + timedelta(minutes=5):
+        submitted_at_client = None
+    submitted_at_value = submitted_at_client or now
+
+    # Never block grading/submission if proctoring persistence fails (DB permissions, schema, etc.).
+    try:
+        _ensure_proctoring_tables()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE proctoring_tab_activity
+                SET returned_at = COALESCE(returned_at, %s),
+                    duration_seconds = GREATEST(duration_seconds, EXTRACT(EPOCH FROM (%s - switched_at))::INT)
+                WHERE attempt_id = %s AND returned_at IS NULL
+                """,
+                [submitted_at_value, submitted_at_value, attempt.id],
+            )
+    except Exception:
+        pass
+
     attempt.status = "AUTO_GRADED"
     attempt.score = round(total, 2)
-    attempt.submitted_at = now
-    attempt.end_time = now
+    attempt.submitted_at = submitted_at_value
+    attempt.end_time = submitted_at_value
     attempt.auto_submitted = bool(payload.get("autoSubmitted", False))
     attempt.updated_at = now
     attempt.save(update_fields=["status", "score", "submitted_at", "end_time", "auto_submitted", "updated_at"])
     return JsonResponse({"saved": True, "submitted": True, "attemptId": str(attempt.id)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def student_attempt_timed_out(request, assessment_id):
+    """Clock ran out while auto-submit-on-timeout is disabled: close attempt without grading."""
+    auth_error = require_student_auth(request)
+    if auth_error:
+        return auth_error
+    student_id = request.user.id
+    try:
+        assessment = Assessment.objects.select_related("module").get(id=assessment_id, deleted_at__isnull=True)
+    except Assessment.DoesNotExist:
+        return JsonResponse({"detail": "Assessment not found"}, status=404)
+    if assessment.module_id not in _student_enrolled_module_ids(student_id):
+        return JsonResponse({"detail": "Forbidden"}, status=403)
+    if bool(assessment.auto_submit):
+        return JsonResponse(
+            {"detail": "This assessment is configured to auto-submit when time runs out."},
+            status=409,
+        )
+
+    attempt = (
+        Attempt.objects.filter(student_id=student_id, assessment_id=assessment_id)
+        .select_related("assessment")
+        .order_by("-attempt_number")
+        .first()
+    )
+    if not attempt:
+        return JsonResponse({"detail": "Attempt not found"}, status=404)
+    if _attempt_is_timed_out(attempt):
+        return JsonResponse({"saved": True, "attemptId": str(attempt.id), "status": "TIMED_OUT"})
+    if not _attempt_allows_editing(attempt):
+        return JsonResponse({"detail": "Attempt is not open for time expiry."}, status=409)
+
+    _ensure_attempts_status_allows_timed_out()
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        payload = {}
+    _save_attempt_answers(attempt, payload.get("answers") or {})
+
+    now = timezone.now()
+    attempt.status = "TIMED_OUT"
+    attempt.end_time = now
+    attempt.submitted_at = None
+    attempt.auto_submitted = False
+    attempt.updated_at = now
+    try:
+        attempt.save(update_fields=["status", "end_time", "submitted_at", "auto_submitted", "updated_at"])
+    except IntegrityError:
+        cache.delete(_ATTEMPTS_TIMED_OUT_CONSTRAINT_CACHE_KEY)
+        _ensure_attempts_status_allows_timed_out()
+        try:
+            attempt.save(update_fields=["status", "end_time", "submitted_at", "auto_submitted", "updated_at"])
+        except IntegrityError:
+            return JsonResponse(
+                {"detail": "Your attempt was not submitted.", "code": "timed_out_not_saved"},
+                status=503,
+            )
+    return JsonResponse({"saved": True, "attemptId": str(attempt.id), "status": "TIMED_OUT"})
 
 
 @require_GET
@@ -883,6 +1146,11 @@ def student_results(request, assessment_id):
     )
     if not attempt:
         return JsonResponse({"detail": "Results not found"}, status=404)
+    if _attempt_is_timed_out(attempt):
+        return JsonResponse(
+            {"detail": "No submitted results. Your attempt ended when time ran out without submission."},
+            status=404,
+        )
 
     visibility = AssessmentResultVisibility.objects.filter(assessment_id=assessment_id).first()
     if not visibility:

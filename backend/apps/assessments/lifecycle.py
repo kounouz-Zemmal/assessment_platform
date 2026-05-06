@@ -7,10 +7,10 @@ from apps.common.utils import normalize_aware_datetime
 
 def refresh_assessment_lifecycle(assessment):
     """
-    Keep assessment.status aligned with real schedule:
-    - SCHEDULED -> ACTIVE when start has passed
-    - SCHEDULED/ACTIVE -> CLOSED when the resolved end has passed
-    PUBLISHED is not auto-changed.
+    Keep assessment.status aligned with real schedule (no manual step required):
+    - SCHEDULED -> ACTIVE when start time has passed
+    - SCHEDULED/ACTIVE -> CLOSED when the resolved end has passed (shown as "Completed" in the UI)
+    DRAFT and PUBLISHED are not auto-changed here.
     """
     if not assessment or not assessment.id:
         return assessment

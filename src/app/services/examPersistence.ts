@@ -1,9 +1,11 @@
 type AttemptOutboxItem = {
   key: string;
   assessmentId: string;
-  kind: "save" | "submit";
+  kind: "save" | "submit" | "timed_out";
   answers: Record<string, string>;
   autoSubmitted?: boolean;
+  /** Client-side submission time when queued (offline); preserved on sync. */
+  submittedAt?: string;
   updatedAt: string;
 };
 
@@ -117,7 +119,12 @@ export async function enqueueOutbox(item: Omit<AttemptOutboxItem, "key" | "updat
   const tx = db.transaction(STORE_NAME, "readwrite");
   const store = tx.objectStore(STORE_NAME);
   const key = `${item.assessmentId}:${item.kind}`;
-  store.put({ ...item, key, updatedAt: new Date().toISOString() } satisfies AttemptOutboxItem);
+  const updatedAt = new Date().toISOString();
+  const submittedAt =
+    item.kind === "submit"
+      ? item.submittedAt || updatedAt
+      : undefined;
+  store.put({ ...item, key, updatedAt, submittedAt } satisfies AttemptOutboxItem);
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
