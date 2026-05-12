@@ -147,6 +147,11 @@ def delete_user(request, user_id):
 @csrf_exempt
 @require_POST
 def import_students_csv(request):
+    """
+    Import students from a Progres-format CSV.
+    Expected columns: Mat. Etudiant, Nom, Prénom, Email, Situation, Group, Section, Niveau 2024-2025
+    Falls back to legacy format: first_name, last_name, email, password
+    """
     if "file" not in request.FILES:
         return JsonResponse({"success": False, "error": "No file provided"}, status=400)
 
@@ -155,27 +160,45 @@ def import_students_csv(request):
         return JsonResponse({"success": False, "error": "File must be CSV"}, status=400)
 
     try:
-        decoded_file = csv_file.read().decode("utf-8")
-        io_string = io.StringIO(decoded_file)
-        reader = csv.DictReader(io_string)
+        raw = csv_file.read()
+        try:
+            decoded_file = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded_file = raw.decode("latin-1")
+
+        reader = csv.DictReader(io.StringIO(decoded_file))
+        headers = reader.fieldnames or []
+
+        # Detect format: Progres (has "Nom") vs legacy (has "first_name")
+        is_progres = "Nom" in headers or "Prénom" in headers or "Mat. Etudiant" in headers
 
         student_role = Role.objects.get(name__iexact="student")
         created_users = []
+        skipped = []
         errors = []
 
         with transaction.atomic():
-            for row in reader:
+            for i, row in enumerate(reader, start=2):
                 try:
-                    first_name = row.get("first_name")
-                    last_name = row.get("last_name")
-                    email = row.get("email")
+                    if is_progres:
+                        last_name  = (row.get("Nom") or "").strip()
+                        first_name = (row.get("Prénom") or "").strip()
+                        email      = (row.get("Email") or "").strip()
+                        matricule  = (row.get("Mat. Etudiant") or "").strip()
+                        password   = matricule if matricule else "changeme123"
+                    else:
+                        first_name = (row.get("first_name") or "").strip()
+                        last_name  = (row.get("last_name") or "").strip()
+                        email      = (row.get("email") or "").strip()
+                        password   = row.get("password", "changeme123")
 
                     if not all([first_name, last_name, email]):
-                        errors.append(f"Missing fields for {email}")
+                        errors.append(f"Row {i}: missing required fields")
                         continue
 
-                    # Generate password or use default
-                    password = row.get("password", "defaultpassword123")
+                    if User.objects.filter(email=email).exists():
+                        skipped.append(email)
+                        continue
 
                     user = User.objects.create_user(
                         email=email,
@@ -183,24 +206,107 @@ def import_students_csv(request):
                         last_name=last_name,
                         password=password,
                         role=student_role,
-                        is_active=True
+                        is_active=True,
                     )
                     created_users.append({
                         "id": user.id,
                         "email": user.email,
-                        "name": f"{user.first_name} {user.last_name}"
+                        "name": f"{user.first_name} {user.last_name}",
                     })
 
                 except Exception as e:
-                    errors.append(f"Error for {row.get('email')}: {str(e)}")
+                    errors.append(f"Row {i} ({row.get('Email') or row.get('email', '?')}): {e}")
 
         return JsonResponse({
             "success": True,
             "data": {
                 "created": created_users,
-                "errors": errors
+                "skipped": skipped,
+                "errors": errors,
             }
         })
 
     except Exception as e:
-        return JsonResponse({"success": False, "error": f"Error processing file: {str(e)}"}, status=500)
+        return JsonResponse({"success": False, "error": f"Error processing file: {e}"}, status=500)
+
+
+@login_required
+@user_passes_test(is_admin)
+@csrf_exempt
+@require_POST
+def import_teachers_csv(request):
+    """
+    Import teachers from a Progres-format CSV.
+    Expected columns: Faculty Member, AbvEns, Grade, Email, Département
+    Password defaults to the teacher's abbreviation (AbvEns).
+    """
+    if "file" not in request.FILES:
+        return JsonResponse({"success": False, "error": "No file provided"}, status=400)
+
+    csv_file = request.FILES["file"]
+    if not csv_file.name.endswith(".csv"):
+        return JsonResponse({"success": False, "error": "File must be CSV"}, status=400)
+
+    try:
+        raw = csv_file.read()
+        try:
+            decoded_file = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded_file = raw.decode("latin-1")
+
+        reader = csv.DictReader(io.StringIO(decoded_file))
+        teacher_role = Role.objects.get(name__iexact="teacher")
+        created_users = []
+        skipped = []
+        errors = []
+
+        with transaction.atomic():
+            for i, row in enumerate(reader, start=2):
+                try:
+                    full_name  = (row.get("Faculty Member") or "").strip()
+                    abbv       = (row.get("AbvEns") or "").strip()
+                    email      = (row.get("Email") or "").strip()
+
+                    if not all([full_name, email]):
+                        errors.append(f"Row {i}: missing Faculty Member or Email")
+                        continue
+
+                    # Split full name: last word is first name, rest is last name
+                    parts = full_name.split()
+                    first_name = parts[-1] if len(parts) > 1 else full_name
+                    last_name  = " ".join(parts[:-1]) if len(parts) > 1 else ""
+
+                    password = abbv if abbv else "changeme123"
+
+                    if User.objects.filter(email=email).exists():
+                        skipped.append(email)
+                        continue
+
+                    user = User.objects.create_user(
+                        email=email,
+                        first_name=first_name,
+                        last_name=last_name,
+                        password=password,
+                        role=teacher_role,
+                        is_active=True,
+                    )
+                    created_users.append({
+                        "id": user.id,
+                        "email": user.email,
+                        "name": f"{user.first_name} {user.last_name}",
+                    })
+
+                except Exception as e:
+                    errors.append(f"Row {i} ({row.get('Email', '?')}): {e}")
+
+        return JsonResponse({
+            "success": True,
+            "data": {
+                "created": created_users,
+                "skipped": skipped,
+                "errors": errors,
+            }
+        })
+
+    except Exception as e:
+        return JsonResponse({"success": False, "error": f"Error processing file: {e}"}, status=500)
