@@ -1,7 +1,9 @@
 import json
 from decimal import Decimal
+from typing import Dict, Optional
 
 from django.http import JsonResponse
+from django.utils import timezone
 
 
 ASSESSMENT_STATUS_MAP = {
@@ -18,6 +20,7 @@ ATTEMPT_STATUS_MAP = {
     "AUTO_GRADED": "Graded",
     "MANUALLY_GRADED": "Graded",
     "FINALIZED": "Graded",
+    "TIMED_OUT": "Not submitted",
 }
 
 
@@ -104,3 +107,50 @@ def extract_keyword_analysis(private_note):
         pass
 
     return [], []
+
+
+PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS = 10
+
+
+def proctor_cache_key(assessment_id, student_id):
+    return f"proctoring:{assessment_id}:{student_id}"
+
+
+def normalize_aware_datetime(value):
+    if value is None:
+        return None
+    if timezone.is_naive(value):
+        return timezone.make_aware(value, timezone.get_current_timezone())
+    return value
+
+
+def parse_iso_datetime(value) -> Optional[timezone.datetime]:
+    if not value:
+        return None
+    try:
+        parsed = timezone.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return normalize_aware_datetime(parsed)
+
+
+def build_proctor_status(event: Dict, now=None, threshold_seconds: Optional[int] = None):
+    now = now or timezone.now()
+    threshold_value = int(threshold_seconds or PROCTOR_SUSPICIOUS_THRESHOLD_SECONDS)
+    last_seen = parse_iso_datetime(event.get("lastSeenAt"))
+    away_since = parse_iso_datetime(event.get("awaySince"))
+    outside_seconds = int(event.get("outsideDurationSeconds") or 0)
+
+    if away_since:
+        outside_seconds = max(outside_seconds, int((now - away_since).total_seconds()))
+    stale_seconds = int((now - last_seen).total_seconds()) if last_seen else 10**9
+
+    suspicious = bool(event.get("suspicious")) or outside_seconds >= threshold_value
+    if stale_seconds >= (threshold_value + 10):
+        suspicious = True
+
+    return {
+        "outsideDurationSeconds": max(0, outside_seconds),
+        "staleSeconds": max(0, stale_seconds),
+        "isSuspicious": suspicious,
+    }

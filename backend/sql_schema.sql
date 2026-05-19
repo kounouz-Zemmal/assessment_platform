@@ -115,7 +115,7 @@ CREATE TABLE public.attempts (
   student_id integer NOT NULL,
   assessment_id integer NOT NULL,
   attempt_number integer NOT NULL DEFAULT 1 CHECK (attempt_number > 0),
-  status character varying NOT NULL DEFAULT 'IN_PROGRESS'::character varying CHECK (status::text = ANY (ARRAY['IN_PROGRESS'::character varying, 'SUBMITTED'::character varying, 'AUTO_GRADED'::character varying, 'MANUALLY_GRADED'::character varying, 'FINALIZED'::character varying]::text[])),
+  status character varying NOT NULL DEFAULT 'IN_PROGRESS'::character varying CHECK (status::text = ANY (ARRAY['IN_PROGRESS'::character varying, 'SUBMITTED'::character varying, 'AUTO_GRADED'::character varying, 'MANUALLY_GRADED'::character varying, 'FINALIZED'::character varying, 'TIMED_OUT'::character varying]::text[])),
   start_time timestamp without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
   end_time timestamp without time zone,
   submitted_at timestamp without time zone,

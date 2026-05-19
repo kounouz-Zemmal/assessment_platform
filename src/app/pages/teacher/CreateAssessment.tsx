@@ -13,6 +13,27 @@ import { toast } from "sonner";
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet, apiPatch, apiPost } from "../../apiClient";
 
+/** Calendar parts in the user's local timezone (avoid UTC day shifts from toISOString()). */
+function formatLocalDateYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function formatLocalHm(d: Date): string {
+  const h = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${h}:${min}`;
+}
+
+function parseLocalDateTime(dateStr: string, timeStr: string): Date | null {
+  if (!dateStr || !timeStr) return null;
+  const normalizedTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
+  const d = new Date(`${dateStr}T${normalizedTime}`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export default function TeacherCreateAssessment() {
   const navigate = useNavigate();
   const { id } = useParams();
@@ -51,17 +72,20 @@ export default function TeacherCreateAssessment() {
   const [formData, setFormData] = useState({
     title: "",
     moduleId: "",
-    duration: 60,
+    /** String so typing "7" / "17" is not corrupted by parseInt on partial number input. */
+    durationMinutes: "60",
     startDate: "",
     startTime: "",
     endDate: "",
     endTime: "",
     selectedQuestions: [] as string[],
+    selectedTopicFilterId: "all",
     randomize: false,
     instructions: "",
     shuffleAnswers: true,
     autoSubmitOnTimeout: true,
     tabSwitchWarning: false,
+    tabSwitchThresholdSeconds: "10",
   });
 
   useEffect(() => {
@@ -100,6 +124,7 @@ export default function TeacherCreateAssessment() {
         shuffleAnswers?: boolean;
         autoSubmitOnTimeout?: boolean;
         tabSwitchWarning?: boolean;
+        tabSwitchThresholdSeconds?: number;
       };
     }>(`teacher/assessments/${id}`)
       .then((data) => {
@@ -107,25 +132,29 @@ export default function TeacherCreateAssessment() {
         setFormData({
           title: assessment.title || "",
           moduleId: assessment.moduleId || "",
-          duration: assessment.duration || 60,
+          durationMinutes: String(Math.max(1, assessment.duration || 60)),
           startDate: assessment.startTime
-            ? new Date(assessment.startTime).toISOString().split("T")[0]
+            ? formatLocalDateYmd(new Date(assessment.startTime))
             : "",
           startTime: assessment.startTime
-            ? new Date(assessment.startTime).toTimeString().slice(0, 5)
+            ? formatLocalHm(new Date(assessment.startTime))
             : "",
           endDate: assessment.endTime
-            ? new Date(assessment.endTime).toISOString().split("T")[0]
+            ? formatLocalDateYmd(new Date(assessment.endTime))
             : "",
           endTime: assessment.endTime
-            ? new Date(assessment.endTime).toTimeString().slice(0, 5)
+            ? formatLocalHm(new Date(assessment.endTime))
             : "",
           selectedQuestions: assessment.questions || [],
+          selectedTopicFilterId: "all",
           randomize: assessment.randomize || false,
           instructions: assessment.instructions || "",
           shuffleAnswers: assessment.shuffleAnswers ?? true,
           autoSubmitOnTimeout: assessment.autoSubmitOnTimeout ?? true,
           tabSwitchWarning: assessment.tabSwitchWarning ?? false,
+          tabSwitchThresholdSeconds: String(
+            Math.max(1, Number(assessment.tabSwitchThresholdSeconds ?? 10)),
+          ),
         });
       })
       .catch((error) => {
@@ -161,6 +190,33 @@ export default function TeacherCreateAssessment() {
       });
   }, [formData.moduleId]);
 
+  useEffect(() => {
+    if (!formData.startDate || !formData.startTime) {
+      return;
+    }
+    const parsedDur = parseInt(formData.durationMinutes, 10);
+    if (!Number.isFinite(parsedDur) || parsedDur < 1) {
+      return;
+    }
+    const minutes = parsedDur;
+    const start = parseLocalDateTime(formData.startDate, formData.startTime);
+    if (!start) {
+      return;
+    }
+    const end = new Date(start.getTime() + minutes * 60 * 1000);
+    const nextEndDate = formatLocalDateYmd(end);
+    const nextEndTime = formatLocalHm(end);
+
+    if (formData.endDate === nextEndDate && formData.endTime === nextEndTime) {
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      endDate: nextEndDate,
+      endTime: nextEndTime,
+    }));
+  }, [formData.startDate, formData.startTime, formData.durationMinutes, formData.endDate, formData.endTime]);
+
   const toggleQuestion = (questionId: string) => {
     setFormData({
       ...formData,
@@ -179,7 +235,7 @@ export default function TeacherCreateAssessment() {
     }
     
     if (!formData.title || !formData.moduleId || formData.selectedQuestions.length === 0) {
-      toast.error("Please fill in all required fields and select at least one question");
+      toast.error("Please fill in required fields and select at least one question");
       return;
     }
 
@@ -192,20 +248,18 @@ export default function TeacherCreateAssessment() {
       return;
     }
 
-    const startTimeIso =
-      formData.startDate && formData.startTime
-        ? new Date(`${formData.startDate}T${formData.startTime}`).toISOString()
-        : null;
-    const endTimeIso =
-      formData.endDate && formData.endTime
-        ? new Date(`${formData.endDate}T${formData.endTime}`).toISOString()
-        : null;
+    const startLocal = parseLocalDateTime(formData.startDate, formData.startTime);
+    const endLocal = parseLocalDateTime(formData.endDate, formData.endTime);
+    const startTimeIso = startLocal ? startLocal.toISOString() : null;
+    const endTimeIso = endLocal ? endLocal.toISOString() : null;
+
+    const durationValue = Math.max(1, parseInt(formData.durationMinutes, 10) || 60);
 
     try {
       const payload = {
         title: formData.title.trim(),
         moduleId: formData.moduleId,
-        duration: formData.duration,
+        duration: durationValue,
         startTime: startTimeIso,
         endTime: endTimeIso,
         selectedQuestions: formData.selectedQuestions,
@@ -214,6 +268,7 @@ export default function TeacherCreateAssessment() {
         shuffleAnswers: formData.shuffleAnswers,
         autoSubmitOnTimeout: formData.autoSubmitOnTimeout,
         tabSwitchWarning: formData.tabSwitchWarning,
+        tabSwitchThresholdSeconds: Math.max(1, Number(formData.tabSwitchThresholdSeconds) || 10),
       };
 
       if (isEditing && id) {
@@ -274,7 +329,14 @@ export default function TeacherCreateAssessment() {
               <Label htmlFor="module">Module *</Label>
               <Select
                 value={formData.moduleId}
-                onValueChange={(value) => setFormData({ ...formData, moduleId: value, selectedQuestions: [] })}
+                onValueChange={(value) =>
+                  setFormData({
+                    ...formData,
+                    moduleId: value,
+                    selectedQuestions: [],
+                    selectedTopicFilterId: "all",
+                  })
+                }
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select module" />
@@ -298,10 +360,21 @@ export default function TeacherCreateAssessment() {
               <Label htmlFor="duration">Duration (minutes) *</Label>
               <Input
                 id="duration"
-                type="number"
-                min="1"
-                value={formData.duration}
-                onChange={(e) => setFormData({ ...formData, duration: parseInt(e.target.value) })}
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={formData.durationMinutes}
+                onChange={(e) => {
+                  const raw = e.target.value.replace(/\D/g, "");
+                  setFormData({ ...formData, durationMinutes: raw });
+                }}
+                onBlur={() => {
+                  const n = parseInt(formData.durationMinutes, 10);
+                  const next = Number.isFinite(n) && n >= 1 ? String(n) : "60";
+                  setFormData({ ...formData, durationMinutes: next });
+                }}
+                onWheel={(e) => e.currentTarget.blur()}
+                placeholder="e.g. 60"
               />
             </div>
           </CardContent>
@@ -388,17 +461,25 @@ export default function TeacherCreateAssessment() {
                   Shuffle answer options for each student
                 </Label>
               </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="autoSubmitOnTimeout"
-                  checked={formData.autoSubmitOnTimeout}
-                  onCheckedChange={(checked) =>
-                    setFormData({ ...formData, autoSubmitOnTimeout: checked as boolean })
+              <div className="space-y-2">
+                <Label htmlFor="timeoutBehavior">When exam time ends</Label>
+                <Select
+                  value={formData.autoSubmitOnTimeout ? "auto_submit" : "no_auto_submit"}
+                  onValueChange={(value) =>
+                    setFormData({
+                      ...formData,
+                      autoSubmitOnTimeout: value === "auto_submit",
+                    })
                   }
-                />
-                <Label htmlFor="autoSubmitOnTimeout" className="cursor-pointer">
-                  Automatically submit when time runs out
-                </Label>
+                >
+                  <SelectTrigger id="timeoutBehavior">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto_submit">Auto-submit exam</SelectItem>
+                    <SelectItem value="no_auto_submit">Do NOT submit automatically</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="flex items-center space-x-2">
                 <Checkbox
@@ -411,6 +492,26 @@ export default function TeacherCreateAssessment() {
                 <Label htmlFor="tabSwitchWarning" className="cursor-pointer">
                   Show warning when student switches tabs or windows
                 </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="tabSwitchThresholdSeconds">Tab-switch suspicious threshold (seconds)</Label>
+                <Input
+                  id="tabSwitchThresholdSeconds"
+                  type="text"
+                  inputMode="numeric"
+                  value={formData.tabSwitchThresholdSeconds}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      tabSwitchThresholdSeconds: e.target.value.replace(/\D/g, ""),
+                    })
+                  }
+                  onBlur={() => {
+                    const next = Math.max(1, Number(formData.tabSwitchThresholdSeconds) || 10);
+                    setFormData({ ...formData, tabSwitchThresholdSeconds: String(next) });
+                  }}
+                  placeholder="10"
+                />
               </div>
             </div>
           </CardContent>
@@ -431,13 +532,46 @@ export default function TeacherCreateAssessment() {
               <p className="text-center text-gray-500 py-8">
                 Please select a module first
               </p>
-            ) : moduleQuestions.length === 0 ? (
-              <p className="text-center text-gray-500 py-8">
-                No questions available for this module.
-              </p>
             ) : (
-              <div className="space-y-3 max-h-96 overflow-y-auto">
-                {moduleQuestions.map((question) => {
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="topicFilter">Choose topic (within selected module)</Label>
+                  <Select
+                    value={formData.selectedTopicFilterId}
+                    onValueChange={(value) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        selectedTopicFilterId: value,
+                        selectedTopicIds: value === "all" ? prev.selectedTopicIds : [value],
+                      }))
+                    }
+                  >
+                    <SelectTrigger id="topicFilter">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All topics</SelectItem>
+                      {(teacherModules.find((m) => m.id === formData.moduleId)?.topics || []).map((topic) => (
+                        <SelectItem key={topic.id} value={topic.id}>
+                          {topic.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                {moduleQuestions.length === 0 ? (
+                  <p className="text-center text-gray-500 py-6">
+                    No questions available for this module.
+                  </p>
+                ) : moduleQuestions
+                  .filter((question) =>
+                    formData.selectedTopicFilterId === "all"
+                      ? true
+                      : question.topicId === formData.selectedTopicFilterId,
+                  )
+                  .map((question) => {
                   const module = teacherModules.find((m) => m.id === question.moduleId);
                   const topic = module?.topics.find((t) => t.id === question.topicId);
                   
@@ -467,6 +601,43 @@ export default function TeacherCreateAssessment() {
                     </div>
                   );
                 })}
+                {moduleQuestions.length > 0 &&
+                  moduleQuestions.filter((question) =>
+                    formData.selectedTopicFilterId === "all"
+                      ? true
+                      : question.topicId === formData.selectedTopicFilterId,
+                  ).length === 0 && (
+                    <p className="text-center text-gray-500 py-6">
+                      No questions match the selected topic filter.
+                    </p>
+                  )}
+                </div>
+
+                {formData.selectedQuestions.length > 0 && (
+                  <div className="pt-2 border-t">
+                    <Label className="text-sm">Selected questions for this assessment</Label>
+                    <div className="mt-2 space-y-2">
+                      {formData.selectedQuestions.map((selectedId, idx) => {
+                        const question = moduleQuestions.find((item) => item.id === selectedId);
+                        return (
+                          <div key={selectedId} className="flex items-center justify-between rounded border px-3 py-2">
+                            <p className="text-sm text-gray-800">
+                              {idx + 1}. {question?.text || `Question #${selectedId}`}
+                            </p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => toggleQuestion(selectedId)}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

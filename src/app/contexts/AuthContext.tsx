@@ -47,12 +47,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, []);
 
   const checkAuthStatus = async () => {
+    setError(null);
     try {
       const response = await apiGet<{ user: User }>("auth/me");
       setUser(response.user);
     } catch (err) {
       // Expected when not authenticated
       setUser(null);
+      setError(null);
     } finally {
       setLoading(false);
     }

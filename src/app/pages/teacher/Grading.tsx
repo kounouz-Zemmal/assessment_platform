@@ -22,7 +22,21 @@ export default function TeacherGrading() {
     score: number | null;
     maxScore: number;
     submittedAt: string | null;
+    submissionMode?: "submitted" | "auto-submitted";
     feedback: string;
+    proctoring?: {
+      leaveCount: number;
+      totalOutsideSeconds: number;
+      thresholdSeconds: number;
+      suspiciousEventCount: number;
+      isSuspicious: boolean;
+      events: Array<{
+        switchedAt: string | null;
+        returnedAt: string | null;
+        durationSeconds: number;
+        isSuspicious?: boolean;
+      }>;
+    };
     answers: Array<{
       questionId: string;
       questionText: string;
@@ -56,7 +70,21 @@ export default function TeacherGrading() {
         score: number | null;
         maxScore: number;
         submittedAt: string | null;
+        submissionMode?: "submitted" | "auto-submitted";
         feedback: string;
+        proctoring?: {
+          leaveCount: number;
+          totalOutsideSeconds: number;
+          thresholdSeconds: number;
+          suspiciousEventCount: number;
+          isSuspicious: boolean;
+          events: Array<{
+            switchedAt: string | null;
+            returnedAt: string | null;
+            durationSeconds: number;
+            isSuspicious?: boolean;
+          }>;
+        };
         answers: Array<{
           questionId: string;
           questionText: string;
@@ -267,6 +295,65 @@ export default function TeacherGrading() {
                   {totalScore} / {submission.maxScore}
                 </p>
               </div>
+              <div>
+                <p className="text-sm text-gray-500">Submission Mode</p>
+                <p className="font-medium">
+                  {submission.submissionMode === "auto-submitted"
+                    ? "Auto-submitted"
+                    : submission.submissionMode === "submitted"
+                      ? "Submitted"
+                      : "—"}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Proctoring History</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
+              <div className="rounded border p-3">
+                <p className="text-gray-500">Tab switches</p>
+                <p className="font-semibold">{submission.proctoring?.leaveCount ?? 0}</p>
+              </div>
+              <div className="rounded border p-3">
+                <p className="text-gray-500">Total outside time</p>
+                <p className="font-semibold">{submission.proctoring?.totalOutsideSeconds ?? 0}s</p>
+              </div>
+              <div className="rounded border p-3">
+                <p className="text-gray-500">Threshold</p>
+                <p className="font-semibold">{submission.proctoring?.thresholdSeconds ?? 10}s</p>
+              </div>
+              <div className={`rounded border p-3 ${
+                submission.proctoring?.isSuspicious ? "bg-red-50 border-red-300" : "bg-green-50 border-green-300"
+              }`}>
+                <p className="text-gray-500">Suspicious events</p>
+                <p className="font-semibold">
+                  {submission.proctoring?.suspiciousEventCount ?? 0}
+                </p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {(submission.proctoring?.events || []).length === 0 ? (
+                <p className="text-sm text-gray-500">No tab-switch events captured.</p>
+              ) : (
+                (submission.proctoring?.events || []).map((event, index) => (
+                  <div
+                    key={`${event.switchedAt || "event"}-${index}`}
+                    className={`rounded border p-3 text-sm ${
+                      event.isSuspicious ? "bg-red-50 border-red-300" : "bg-gray-50"
+                    }`}
+                  >
+                    <p className="font-medium">Switch #{index + 1}</p>
+                    <p>Left: {event.switchedAt ? new Date(event.switchedAt).toLocaleString() : "—"}</p>
+                    <p>Returned: {event.returnedAt ? new Date(event.returnedAt).toLocaleString() : "—"}</p>
+                    <p>Duration: {event.durationSeconds}s {event.isSuspicious ? "(suspicious)" : ""}</p>
+                  </div>
+                ))
+              )}
             </div>
           </CardContent>
         </Card>

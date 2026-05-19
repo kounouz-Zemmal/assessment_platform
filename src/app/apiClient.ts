@@ -18,6 +18,24 @@ function handleAuthFailure(path: string, status: number) {
   }
 }
 
+function isAuthRedirectResponse(response: Response): boolean {
+  try {
+    const parsed = new URL(response.url, window.location.origin);
+    return parsed.pathname === "/api/auth/login";
+  } catch {
+    return false;
+  }
+}
+
+function throwIfSessionRedirect(path: string, response: Response) {
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  if (normalizedPath.startsWith("auth/")) return;
+  if (!isAuthRedirectResponse(response)) return;
+  // Django login_required may redirect non-GET API calls to login endpoint.
+  handleAuthFailure(path, 401);
+  throw new Error("Session expired. Please sign in again.");
+}
+
 function buildUrl(path: string, params?: QueryParams): string {
   const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
   const baseUrl = API_BASE_URL.replace(/\/$/, "");
@@ -45,12 +63,34 @@ function buildUrl(path: string, params?: QueryParams): string {
   return urlString;
 }
 
+/** Use when showing errors to students (e.g. exam expiry) — hides raw "HTML instead of JSON" dev text. */
+export function studentFriendlyApiMessage(error: unknown, shortMessage: string): string {
+  const msg = error instanceof Error ? error.message : String(error || "");
+  if (/html instead of json|invalid json response|server returned html/i.test(msg)) {
+    return shortMessage;
+  }
+  if (
+    /sql_patches|timed_out update|could not record timed|database may need|timed_out_not_saved/i.test(
+      msg,
+    )
+  ) {
+    return shortMessage;
+  }
+  return msg.trim() || shortMessage;
+}
+
 async function parseJsonResponse(response: Response) {
   const text = await response.text();
   if (!text) return null;
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
   try {
-    return JSON.parse(text);
+    return JSON.parse(trimmed);
   } catch {
+    if (/^\s*</.test(trimmed)) {
+      throw new Error(
+        "Server returned HTML instead of JSON (session expired, proxy error, or server crash). Check login and backend logs.",
+      );
+    }
     throw new Error("Invalid JSON response from server");
   }
 }
@@ -82,6 +122,7 @@ export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> 
   const response = await fetch(buildUrl(path, params), {
     credentials: 'include',
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -119,6 +160,7 @@ export async function apiPost<T>(
     credentials: 'include',
     body: JSON.stringify(payload),
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -156,6 +198,7 @@ export async function apiPatch<T>(
     credentials: 'include',
     body: JSON.stringify(payload),
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -193,6 +236,7 @@ export async function apiPut<T>(
     credentials: 'include',
     body: JSON.stringify(payload),
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {
@@ -224,6 +268,7 @@ export async function apiDelete<T>(path: string, params?: QueryParams): Promise<
     },
     credentials: 'include',
   });
+  throwIfSessionRedirect(path, response);
   const body = await parseJsonResponse(response);
 
   if (!response.ok) {

@@ -6,6 +6,11 @@ from . import views
 urlpatterns = [
     path("teacher/profile", views.teacher_profile, name="teacher-profile"),
     path("teacher/dashboard", views.teacher_dashboard, name="teacher-dashboard"),
+    path(
+        "teacher/live-proctoring",
+        views.teacher_live_proctoring_current,
+        name="teacher-live-proctoring-current",
+    ),
     path("teacher/modules", views.teacher_modules, name="teacher-modules"),
     path("teacher/topics", views.teacher_create_topic, name="teacher-create-topic"),
     path("teacher/questions", views.teacher_questions, name="teacher-questions"),
@@ -24,6 +29,11 @@ urlpatterns = [
         "teacher/assessments/<int:assessment_id>/submissions",
         views.teacher_assessment_submissions,
         name="teacher-assessment-submissions",
+    ),
+    path(
+        "teacher/assessments/<int:assessment_id>/live-proctoring",
+        views.teacher_assessment_live_proctoring,
+        name="teacher-assessment-live-proctoring",
     ),
     path(
         "teacher/submissions/<int:submission_id>",

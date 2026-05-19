@@ -1,23 +1,62 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { AlertCircle, Clock, FileText, ArrowRight } from "lucide-react";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Alert, AlertDescription } from "../../components/ui/alert";
-import { assessments, modules } from "../../mockData";
+import { Checkbox } from "../../components/ui/checkbox";
+import { Label } from "../../components/ui/label";
+import { apiGet, apiPost } from "../../apiClient";
+import { toast } from "sonner";
 
 export default function StudentExamInstructions() {
   const { id } = useParams();
   const navigate = useNavigate();
-  
-  const assessment = assessments.find((a) => a.id === id);
-  const module = assessment ? modules.find((m) => m.id === assessment.moduleId) : null;
+  const [assessment, setAssessment] = useState<any | null>(null);
+  const [timedOutWithoutSubmission, setTimedOutWithoutSubmission] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  if (!assessment || !module) {
+  useEffect(() => {
+    if (!id) return;
+    setLoading(true);
+    apiGet<{ assessment: any; timedOutWithoutSubmission?: boolean }>(`student/assessments/${id}/instructions`)
+      .then((data) => {
+        setAssessment(data.assessment);
+        setTimedOutWithoutSubmission(Boolean(data.timedOutWithoutSubmission));
+      })
+      .catch(() => {
+        setAssessment(null);
+        setTimedOutWithoutSubmission(false);
+      })
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  if (loading) {
+    return <div className="p-8">Loading assessment...</div>;
+  }
+
+  if (!assessment) {
     return <div className="p-8">Assessment not found</div>;
   }
 
-  const handleStartExam = () => {
-    navigate(`/student/assessments/${id}/take`);
+  const handleStartExam = async () => {
+    try {
+      await apiPost(`student/assessments/${id}/attempt/start`, {});
+      navigate(`/student/assessments/${id}/take`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to start assessment";
+      if (message.includes("already submitted")) {
+        navigate(`/student/assessments/${id}/results`);
+        return;
+      }
+      if (message.includes("time ended") || message.includes("without a submission")) {
+        toast.warning(message);
+        navigate("/student/assessments");
+        return;
+      }
+      toast.error(message);
+    }
   };
 
   return (
@@ -26,9 +65,20 @@ export default function StudentExamInstructions() {
         <Card>
           <CardHeader>
             <CardTitle className="text-2xl">{assessment.title}</CardTitle>
-            <p className="text-gray-500">{module.code} - {module.name}</p>
+            <p className="text-gray-500">{assessment.moduleCode} - {assessment.moduleName}</p>
           </CardHeader>
           <CardContent className="space-y-6">
+            {timedOutWithoutSubmission && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>
+                  Your time for this assessment ended before you chose to submit. Your instructor set this exam{" "}
+                  <strong>not</strong> to submit automatically when time runs out, so this counts as{" "}
+                  <strong>not submitted</strong> — not “in progress.” You cannot continue the exam. Open{" "}
+                  <strong>My Assessments</strong> to review the status there.
+                </AlertDescription>
+              </Alert>
+            )}
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
@@ -49,7 +99,7 @@ export default function StudentExamInstructions() {
                 <FileText className="h-8 w-8 text-green-600" />
                 <div>
                   <p className="text-sm text-gray-600">Questions</p>
-                  <p className="font-semibold text-lg">{assessment.questions.length}</p>
+                  <p className="font-semibold text-lg">{Number(assessment?.questionCount ?? 0)}</p>
                 </div>
               </div>
             </div>
@@ -88,7 +138,7 @@ export default function StudentExamInstructions() {
                   <span>
                     {assessment.autoSubmitOnTimeout !== false
                       ? "If time runs out, your assessment will be automatically submitted."
-                      : "When time runs out, you will no longer be able to change your answers."}
+                      : "When time runs out, the exam closes, your instructor will see this attempt as not submitted (not “in progress”), and you’ll be taken straight to My Assessments."}
                   </span>
                 </li>
                 <li className="flex gap-2">
@@ -130,7 +180,7 @@ export default function StudentExamInstructions() {
                   Tab switching:{" "}
                   <span className="font-medium">
                     {assessment.tabSwitchWarning
-                      ? "Tab/window switching may trigger a warning"
+                      ? `Tab/window switching may trigger a warning (threshold: ${Number(assessment.tabSwitchThresholdSeconds ?? 10)}s)`
                       : "No tab-switch warnings configured"}
                   </span>
                 </li>
@@ -144,16 +194,28 @@ export default function StudentExamInstructions() {
               </AlertDescription>
             </Alert>
 
+            <div className="flex items-center gap-2 rounded-md border p-3">
+              <Checkbox
+                id="instructions-confirm"
+                checked={confirmed}
+                onCheckedChange={(value) => setConfirmed(Boolean(value))}
+              />
+              <Label htmlFor="instructions-confirm">
+                I have read and understood the exam instructions.
+              </Label>
+            </div>
+
             <div className="flex gap-3 pt-4">
               <Button
                 variant="outline"
                 onClick={() => navigate("/student/assessments")}
                 className="flex-1"
               >
-                Cancel
+                {timedOutWithoutSubmission ? "Back to My Assessments" : "Cancel"}
               </Button>
               <Button
                 onClick={handleStartExam}
+                disabled={!confirmed || timedOutWithoutSubmission}
                 className="flex-1"
               >
                 Start Assessment

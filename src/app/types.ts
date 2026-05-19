@@ -7,7 +7,12 @@ export type AssessmentStatus =
   | "Active"
   | "Closed"
   | "Published";
-export type SubmissionStatus = "Not Started" | "In Progress" | "Submitted" | "Graded";
+export type SubmissionStatus =
+  | "Not Started"
+  | "In Progress"
+  | "Submitted"
+  | "Graded"
+  | "Not submitted";
 
 export interface AssessmentResultsVisibility {
   showFinalScore: boolean;
