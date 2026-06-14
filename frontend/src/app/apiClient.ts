@@ -1,0 +1,290 @@
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
+
+const API_BASE_URL =
+  (
+    (import.meta as unknown as { env?: Record<string, string | undefined> })
+      .env?.VITE_API_BASE_URL
+  ) ?? "/api";
+
+function handleAuthFailure(path: string, status: number) {
+  if (status !== 401 && status !== 403) return;
+
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  const isAuthEndpoint = normalizedPath.startsWith("auth/");
+  if (isAuthEndpoint) return;
+
+  if (window.location.pathname !== "/") {
+    window.location.href = "/";
+  }
+}
+
+function isAuthRedirectResponse(response: Response): boolean {
+  try {
+    const parsed = new URL(response.url, window.location.origin);
+    return parsed.pathname === "/api/auth/login";
+  } catch {
+    return false;
+  }
+}
+
+function throwIfSessionRedirect(path: string, response: Response) {
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  if (normalizedPath.startsWith("auth/")) return;
+  if (!isAuthRedirectResponse(response)) return;
+  // Django login_required may redirect non-GET API calls to login endpoint.
+  handleAuthFailure(path, 401);
+  throw new Error("Session expired. Please sign in again.");
+}
+
+function buildUrl(path: string, params?: QueryParams): string {
+  const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
+  const baseUrl = API_BASE_URL.replace(/\/$/, "");
+
+  let urlString: string;
+  if (baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) {
+    urlString = `${baseUrl}/${normalizedPath}`;
+  } else {
+    urlString = `${baseUrl}/${normalizedPath}`.replace(/\/\/+/g, "/");
+  }
+
+  if (params) {
+    const url = baseUrl.startsWith("http://") || baseUrl.startsWith("https://")
+      ? new URL(urlString)
+      : new URL(urlString, window.location.origin);
+
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === null || value === undefined) return;
+      url.searchParams.set(key, String(value));
+    });
+
+    return url.toString();
+  }
+
+  return urlString;
+}
+
+/** Use when showing errors to students (e.g. exam expiry) — hides raw "HTML instead of JSON" dev text. */
+export function studentFriendlyApiMessage(error: unknown, shortMessage: string): string {
+  const msg = error instanceof Error ? error.message : String(error || "");
+  if (/html instead of json|invalid json response|server returned html/i.test(msg)) {
+    return shortMessage;
+  }
+  if (
+    /sql_patches|timed_out update|could not record timed|database may need|timed_out_not_saved/i.test(
+      msg,
+    )
+  ) {
+    return shortMessage;
+  }
+  return msg.trim() || shortMessage;
+}
+
+async function parseJsonResponse(response: Response) {
+  const text = await response.text();
+  if (!text) return null;
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    if (/^\s*</.test(trimmed)) {
+      throw new Error(
+        "Server returned HTML instead of JSON (session expired, proxy error, or server crash). Check login and backend logs.",
+      );
+    }
+    throw new Error("Invalid JSON response from server");
+  }
+}
+
+// Get CSRF token from cookies or fetch a new one
+async function getCsrfToken(): Promise<string> {
+  // Try to get from cookies first
+  const cookies = document.cookie.split(';');
+  const csrfCookie = cookies.find(cookie => cookie.trim().startsWith('csrftoken='));
+
+  if (csrfCookie) {
+    return csrfCookie.split('=')[1];
+  }
+
+  // Fetch new CSRF token
+  const response = await fetch(`${API_BASE_URL}/auth/csrf-token`, {
+    credentials: 'include',
+  });
+
+  const data = await parseJsonResponse(response);
+  if (!data?.success) {
+    throw new Error('Failed to get CSRF token');
+  }
+
+  return data.data.csrfToken;
+}
+
+export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> {
+  const response = await fetch(buildUrl(path, params), {
+    credentials: 'include',
+  });
+  throwIfSessionRedirect(path, response);
+  const body = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    handleAuthFailure(path, response.status);
+    const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  // Unwrap the response if it has success/data structure
+  if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
+    if (body.success) {
+      return body.data as T;
+    } else {
+      throw new Error(body.error || 'Request failed');
+    }
+  }
+
+  return body as T;
+}
+
+export async function apiPost<T>(
+  path: string,
+  payload: unknown,
+  params?: QueryParams,
+): Promise<T> {
+  const csrfToken = await getCsrfToken();
+
+  const response = await fetch(buildUrl(path, params), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRFToken": csrfToken,
+      "Referer": window.location.origin,
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  throwIfSessionRedirect(path, response);
+  const body = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    handleAuthFailure(path, response.status);
+    const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  // Unwrap the response if it has success/data structure
+  if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
+    if (body.success) {
+      return body.data as T;
+    } else {
+      throw new Error(body.error || 'Request failed');
+    }
+  }
+
+  return body as T;
+}
+
+export async function apiPatch<T>(
+  path: string,
+  payload: unknown,
+  params?: QueryParams,
+): Promise<T> {
+  const csrfToken = await getCsrfToken();
+
+  const response = await fetch(buildUrl(path, params), {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRFToken": csrfToken,
+      "Referer": window.location.origin,
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  throwIfSessionRedirect(path, response);
+  const body = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    handleAuthFailure(path, response.status);
+    const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  // Unwrap the response if it has success/data structure
+  if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
+    if (body.success) {
+      return body.data as T;
+    } else {
+      throw new Error(body.error || 'Request failed');
+    }
+  }
+
+  return body as T;
+}
+
+export async function apiPut<T>(
+  path: string,
+  payload: unknown,
+  params?: QueryParams,
+): Promise<T> {
+  const csrfToken = await getCsrfToken();
+
+  const response = await fetch(buildUrl(path, params), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRFToken": csrfToken,
+      "Referer": window.location.origin,
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  throwIfSessionRedirect(path, response);
+  const body = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    handleAuthFailure(path, response.status);
+    const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  // Unwrap the response if it has success/data structure
+  if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
+    if (body.success) {
+      return body.data as T;
+    } else {
+      throw new Error(body.error || 'Request failed');
+    }
+  }
+
+  return body as T;
+}
+
+export async function apiDelete<T>(path: string, params?: QueryParams): Promise<T> {
+  const csrfToken = await getCsrfToken();
+
+  const response = await fetch(buildUrl(path, params), {
+    method: "DELETE",
+    headers: {
+      "X-CSRFToken": csrfToken,
+      "Referer": window.location.origin,
+    },
+    credentials: 'include',
+  });
+  throwIfSessionRedirect(path, response);
+  const body = await parseJsonResponse(response);
+
+  if (!response.ok) {
+    handleAuthFailure(path, response.status);
+    const message = body?.error ?? body?.detail ?? `Request failed with status ${response.status}`;
+    throw new Error(message);
+  }
+
+  // Unwrap the response if it has success/data structure
+  if (body && typeof body === 'object' && 'success' in body && 'data' in body) {
+    if (body.success) {
+      return body.data as T;
+    } else {
+      throw new Error(body.error || 'Request failed');
+    }
+  }
+
+  return body as T;
+}

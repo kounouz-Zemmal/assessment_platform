@@ -1,0 +1,675 @@
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router";
+import { ArrowLeft } from "lucide-react";
+import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
+import { Label } from "../../components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
+import { Checkbox } from "../../components/ui/checkbox";
+import { Textarea } from "../../components/ui/textarea";
+import { Badge } from "../../components/ui/badge";
+import { toast } from "sonner";
+import { useAuth } from "../../contexts/AuthContext";
+import { apiGet, apiPatch, apiPost } from "../../apiClient";
+
+/** Calendar parts in the user's local timezone (avoid UTC day shifts from toISOString()). */
+function formatLocalDateYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function formatLocalHm(d: Date): string {
+  const h = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${h}:${min}`;
+}
+
+function parseLocalDateTime(dateStr: string, timeStr: string): Date | null {
+  if (!dateStr || !timeStr) return null;
+  const normalizedTime = timeStr.length === 5 ? `${timeStr}:00` : timeStr;
+  const d = new Date(`${dateStr}T${normalizedTime}`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+export default function TeacherCreateAssessment() {
+  const navigate = useNavigate();
+  const { id } = useParams();
+  const isEditing = !!id;
+  const { user } = useAuth();
+
+  if (!user) {
+    return <div className="p-8">Loading...</div>;
+  }
+  
+  const [isLoadingAssessment, setIsLoadingAssessment] = useState(isEditing);
+  const [teacherModules, setTeacherModules] = useState<
+    Array<{
+      id: string;
+      code: string;
+      name: string;
+      topics: Array<{ id: string; name: string; moduleId: string }>;
+    }>
+  >([]);
+  const [moduleQuestions, setModuleQuestions] = useState<
+    Array<{
+      id: string;
+      moduleId: string;
+      topicId: string;
+      type: string;
+      text: string;
+      points: number;
+      createdBy: string;
+    }>
+  >([]);
+  const assignedModuleIds = useMemo(
+    () => teacherModules.map((module) => String(module.id)),
+    [teacherModules]
+  );
+
+  const [formData, setFormData] = useState({
+    title: "",
+    moduleId: "",
+    /** String so typing "7" / "17" is not corrupted by parseInt on partial number input. */
+    durationMinutes: "60",
+    startDate: "",
+    startTime: "",
+    endDate: "",
+    endTime: "",
+    selectedQuestions: [] as string[],
+    selectedTopicFilterId: "all",
+    randomize: false,
+    instructions: "",
+    shuffleAnswers: true,
+    autoSubmitOnTimeout: true,
+    tabSwitchWarning: false,
+    tabSwitchThresholdSeconds: "10",
+  });
+
+  useEffect(() => {
+    apiGet<{
+      modules: Array<{
+        id: string;
+        code: string;
+        name: string;
+        topics: Array<{ id: string; name: string; moduleId: string }>;
+      }>;
+    }>("teacher/modules")
+      .then((data) => setTeacherModules(data.modules))
+      .catch((error) => {
+        const message =
+          error instanceof Error ? error.message : "Failed to load assigned modules";
+        toast.error(message);
+        setTeacherModules([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!isEditing || !id) return;
+
+    setIsLoadingAssessment(true);
+    apiGet<{
+      assessment: {
+        id: string;
+        title: string;
+        moduleId: string;
+        duration: number;
+        startTime: string | null;
+        endTime: string | null;
+        questions: string[];
+        randomize: boolean;
+        instructions?: string;
+        shuffleAnswers?: boolean;
+        autoSubmitOnTimeout?: boolean;
+        tabSwitchWarning?: boolean;
+        tabSwitchThresholdSeconds?: number;
+      };
+    }>(`teacher/assessments/${id}`)
+      .then((data) => {
+        const assessment = data.assessment;
+        setFormData({
+          title: assessment.title || "",
+          moduleId: assessment.moduleId || "",
+          durationMinutes: String(Math.max(1, assessment.duration || 60)),
+          startDate: assessment.startTime
+            ? formatLocalDateYmd(new Date(assessment.startTime))
+            : "",
+          startTime: assessment.startTime
+            ? formatLocalHm(new Date(assessment.startTime))
+            : "",
+          endDate: assessment.endTime
+            ? formatLocalDateYmd(new Date(assessment.endTime))
+            : "",
+          endTime: assessment.endTime
+            ? formatLocalHm(new Date(assessment.endTime))
+            : "",
+          selectedQuestions: assessment.questions || [],
+          selectedTopicFilterId: "all",
+          randomize: assessment.randomize || false,
+          instructions: assessment.instructions || "",
+          shuffleAnswers: assessment.shuffleAnswers ?? true,
+          autoSubmitOnTimeout: assessment.autoSubmitOnTimeout ?? true,
+          tabSwitchWarning: assessment.tabSwitchWarning ?? false,
+          tabSwitchThresholdSeconds: String(
+            Math.max(1, Number(assessment.tabSwitchThresholdSeconds ?? 10)),
+          ),
+        });
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Failed to load assessment");
+        navigate("/teacher/assessments");
+      })
+      .finally(() => setIsLoadingAssessment(false));
+  }, [isEditing, id, navigate]);
+
+  useEffect(() => {
+    if (!formData.moduleId) {
+      setModuleQuestions([]);
+      return;
+    }
+
+    apiGet<{
+      questions: Array<{
+        id: string;
+        moduleId: string;
+        topicId: string;
+        type: string;
+        text: string;
+        points: number;
+        createdBy: string;
+      }>;
+    }>("teacher/questions", { module_id: formData.moduleId, page: 1, page_size: 100 })
+      .then((data) => setModuleQuestions(data.questions))
+      .catch((error) => {
+        const message =
+          error instanceof Error ? error.message : "Failed to load module questions";
+        toast.error(message);
+        setModuleQuestions([]);
+      });
+  }, [formData.moduleId]);
+
+  useEffect(() => {
+    if (!formData.startDate || !formData.startTime) {
+      return;
+    }
+    const parsedDur = parseInt(formData.durationMinutes, 10);
+    if (!Number.isFinite(parsedDur) || parsedDur < 1) {
+      return;
+    }
+    const minutes = parsedDur;
+    const start = parseLocalDateTime(formData.startDate, formData.startTime);
+    if (!start) {
+      return;
+    }
+    const end = new Date(start.getTime() + minutes * 60 * 1000);
+    const nextEndDate = formatLocalDateYmd(end);
+    const nextEndTime = formatLocalHm(end);
+
+    if (formData.endDate === nextEndDate && formData.endTime === nextEndTime) {
+      return;
+    }
+    setFormData((prev) => ({
+      ...prev,
+      endDate: nextEndDate,
+      endTime: nextEndTime,
+    }));
+  }, [formData.startDate, formData.startTime, formData.durationMinutes, formData.endDate, formData.endTime]);
+
+  const toggleQuestion = (questionId: string) => {
+    setFormData({
+      ...formData,
+      selectedQuestions: formData.selectedQuestions.includes(questionId)
+        ? formData.selectedQuestions.filter((id) => id !== questionId)
+        : [...formData.selectedQuestions, questionId],
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!assignedModuleIds.includes(formData.moduleId)) {
+      toast.error("You can only create assessments for modules assigned to you");
+      return;
+    }
+    
+    if (!formData.title || !formData.moduleId || formData.selectedQuestions.length === 0) {
+      toast.error("Please fill in required fields and select at least one question");
+      return;
+    }
+
+    const moduleQuestionIds = new Set(moduleQuestions.map((question) => question.id));
+    const hasQuestionOutsideModule = formData.selectedQuestions.some(
+      (questionId) => !moduleQuestionIds.has(questionId)
+    );
+    if (hasQuestionOutsideModule) {
+      toast.error("You can only include questions from the selected module");
+      return;
+    }
+
+    const startLocal = parseLocalDateTime(formData.startDate, formData.startTime);
+    const endLocal = parseLocalDateTime(formData.endDate, formData.endTime);
+    const startTimeIso = startLocal ? startLocal.toISOString() : null;
+    const endTimeIso = endLocal ? endLocal.toISOString() : null;
+
+    const durationValue = Math.max(1, parseInt(formData.durationMinutes, 10) || 60);
+
+    try {
+      const payload = {
+        title: formData.title.trim(),
+        moduleId: formData.moduleId,
+        duration: durationValue,
+        startTime: startTimeIso,
+        endTime: endTimeIso,
+        selectedQuestions: formData.selectedQuestions,
+        randomize: formData.randomize,
+        instructions: formData.instructions,
+        shuffleAnswers: formData.shuffleAnswers,
+        autoSubmitOnTimeout: formData.autoSubmitOnTimeout,
+        tabSwitchWarning: formData.tabSwitchWarning,
+        tabSwitchThresholdSeconds: Math.max(1, Number(formData.tabSwitchThresholdSeconds) || 10),
+      };
+
+      if (isEditing && id) {
+        await apiPatch(`teacher/assessments/${id}`, payload);
+      } else {
+        await apiPost("teacher/assessments", payload);
+      }
+
+      toast.success(isEditing ? "Assessment updated successfully" : "Assessment created successfully");
+      navigate("/teacher/assessments");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save assessment");
+    }
+  };
+
+  if (isLoadingAssessment) {
+    return <div className="p-8">Loading assessment...</div>;
+  }
+
+  return (
+    <div className="p-8">
+      <Button
+        variant="ghost"
+        className="mb-6"
+        onClick={() => navigate("/teacher/assessments")}
+      >
+        <ArrowLeft className="h-4 w-4 mr-2" />
+        Back to Assessments
+      </Button>
+
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900">
+          {isEditing ? "Edit Assessment" : "Create New Assessment"}
+        </h1>
+        <p className="text-gray-500 mt-1">
+          {isEditing ? "Update assessment details" : "Set up a new assessment"}
+        </p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="max-w-4xl space-y-6">
+        {/* Basic Information */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Basic Information</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="title">Assessment Title *</Label>
+              <Input
+                id="title"
+                value={formData.title}
+                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                placeholder="e.g., Midterm Exam - Python Basics"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="module">Module *</Label>
+              <Select
+                value={formData.moduleId}
+                onValueChange={(value) =>
+                  setFormData({
+                    ...formData,
+                    moduleId: value,
+                    selectedQuestions: [],
+                    selectedTopicFilterId: "all",
+                  })
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select module" />
+                </SelectTrigger>
+                <SelectContent>
+                  {teacherModules.map((module) => (
+                    <SelectItem key={module.id} value={module.id}>
+                      {module.code} - {module.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {teacherModules.length === 0 && (
+                <p className="text-xs text-amber-600">
+                  No modules are currently assigned to you.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="duration">Duration (minutes) *</Label>
+              <Input
+                id="duration"
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={formData.durationMinutes}
+                onChange={(e) => {
+                  const raw = e.target.value.replace(/\D/g, "");
+                  setFormData({ ...formData, durationMinutes: raw });
+                }}
+                onBlur={() => {
+                  const n = parseInt(formData.durationMinutes, 10);
+                  const next = Number.isFinite(n) && n >= 1 ? String(n) : "60";
+                  setFormData({ ...formData, durationMinutes: next });
+                }}
+                onWheel={(e) => e.currentTarget.blur()}
+                placeholder="e.g. 60"
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Schedule */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Schedule</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="startDate">Start Date *</Label>
+                <Input
+                  id="startDate"
+                  type="date"
+                  value={formData.startDate}
+                  onChange={(e) => setFormData({ ...formData, startDate: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="startTime">Start Time *</Label>
+                <Input
+                  id="startTime"
+                  type="time"
+                  value={formData.startTime}
+                  onChange={(e) => setFormData({ ...formData, startTime: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="endDate">End Date *</Label>
+                <Input
+                  id="endDate"
+                  type="date"
+                  value={formData.endDate}
+                  onChange={(e) => setFormData({ ...formData, endDate: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="endTime">End Time *</Label>
+                <Input
+                  id="endTime"
+                  type="time"
+                  value={formData.endTime}
+                  onChange={(e) => setFormData({ ...formData, endTime: e.target.value })}
+                />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Instructions & Settings */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Instructions & Settings</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="space-y-2">
+              <Label htmlFor="instructions">Student Instructions (optional)</Label>
+              <Textarea
+                id="instructions"
+                rows={4}
+                placeholder="Explain the scope, rules, and expectations for this assessment..."
+                value={formData.instructions}
+                onChange={(e) => setFormData({ ...formData, instructions: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-sm font-semibold text-gray-700">Anti-cheating & behavior</p>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="shuffleAnswers"
+                  checked={formData.shuffleAnswers}
+                  onCheckedChange={(checked) =>
+                    setFormData({ ...formData, shuffleAnswers: checked as boolean })
+                  }
+                />
+                <Label htmlFor="shuffleAnswers" className="cursor-pointer">
+                  Shuffle answer options for each student
+                </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="timeoutBehavior">When exam time ends</Label>
+                <Select
+                  value={formData.autoSubmitOnTimeout ? "auto_submit" : "no_auto_submit"}
+                  onValueChange={(value) =>
+                    setFormData({
+                      ...formData,
+                      autoSubmitOnTimeout: value === "auto_submit",
+                    })
+                  }
+                >
+                  <SelectTrigger id="timeoutBehavior">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto_submit">Auto-submit exam</SelectItem>
+                    <SelectItem value="no_auto_submit">Do NOT submit automatically</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="tabSwitchWarning"
+                  checked={formData.tabSwitchWarning}
+                  onCheckedChange={(checked) =>
+                    setFormData({ ...formData, tabSwitchWarning: checked as boolean })
+                  }
+                />
+                <Label htmlFor="tabSwitchWarning" className="cursor-pointer">
+                  Show warning when student switches tabs or windows
+                </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="tabSwitchThresholdSeconds">Tab-switch suspicious threshold (seconds)</Label>
+                <Input
+                  id="tabSwitchThresholdSeconds"
+                  type="text"
+                  inputMode="numeric"
+                  value={formData.tabSwitchThresholdSeconds}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      tabSwitchThresholdSeconds: e.target.value.replace(/\D/g, ""),
+                    })
+                  }
+                  onBlur={() => {
+                    const next = Math.max(1, Number(formData.tabSwitchThresholdSeconds) || 10);
+                    setFormData({ ...formData, tabSwitchThresholdSeconds: String(next) });
+                  }}
+                  placeholder="10"
+                />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Question Selection */}
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              Select Questions
+              <span className="text-sm font-normal text-gray-500 ml-2">
+                ({formData.selectedQuestions.length} selected)
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!formData.moduleId ? (
+              <p className="text-center text-gray-500 py-8">
+                Please select a module first
+              </p>
+            ) : (
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="topicFilter">Choose topic (within selected module)</Label>
+                  <Select
+                    value={formData.selectedTopicFilterId}
+                    onValueChange={(value) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        selectedTopicFilterId: value,
+                        selectedTopicIds: value === "all" ? prev.selectedTopicIds : [value],
+                      }))
+                    }
+                  >
+                    <SelectTrigger id="topicFilter">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All topics</SelectItem>
+                      {(teacherModules.find((m) => m.id === formData.moduleId)?.topics || []).map((topic) => (
+                        <SelectItem key={topic.id} value={topic.id}>
+                          {topic.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                {moduleQuestions.length === 0 ? (
+                  <p className="text-center text-gray-500 py-6">
+                    No questions available for this module.
+                  </p>
+                ) : moduleQuestions
+                  .filter((question) =>
+                    formData.selectedTopicFilterId === "all"
+                      ? true
+                      : question.topicId === formData.selectedTopicFilterId,
+                  )
+                  .map((question) => {
+                  const module = teacherModules.find((m) => m.id === question.moduleId);
+                  const topic = module?.topics.find((t) => t.id === question.topicId);
+                  
+                  return (
+                    <div
+                      key={question.id}
+                      className="flex items-start gap-3 p-3 border rounded-lg hover:bg-gray-50"
+                    >
+                      <Checkbox
+                        checked={formData.selectedQuestions.includes(question.id)}
+                        onCheckedChange={() => toggleQuestion(question.id)}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Badge variant="outline">{question.type}</Badge>
+                          {topic && (
+                            <Badge variant="outline" className="text-xs">
+                              {topic.name}
+                            </Badge>
+                          )}
+                          <span className="text-sm text-gray-500 ml-auto">
+                            {question.points} pts
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-900">{question.text}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+                {moduleQuestions.length > 0 &&
+                  moduleQuestions.filter((question) =>
+                    formData.selectedTopicFilterId === "all"
+                      ? true
+                      : question.topicId === formData.selectedTopicFilterId,
+                  ).length === 0 && (
+                    <p className="text-center text-gray-500 py-6">
+                      No questions match the selected topic filter.
+                    </p>
+                  )}
+                </div>
+
+                {formData.selectedQuestions.length > 0 && (
+                  <div className="pt-2 border-t">
+                    <Label className="text-sm">Selected questions for this assessment</Label>
+                    <div className="mt-2 space-y-2">
+                      {formData.selectedQuestions.map((selectedId, idx) => {
+                        const question = moduleQuestions.find((item) => item.id === selectedId);
+                        return (
+                          <div key={selectedId} className="flex items-center justify-between rounded border px-3 py-2">
+                            <p className="text-sm text-gray-800">
+                              {idx + 1}. {question?.text || `Question #${selectedId}`}
+                            </p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => toggleQuestion(selectedId)}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center space-x-2 mt-4 pt-4 border-t">
+              <Checkbox
+                id="randomize"
+                checked={formData.randomize}
+                onCheckedChange={(checked) =>
+                  setFormData({ ...formData, randomize: checked as boolean })
+                }
+              />
+              <Label htmlFor="randomize" className="cursor-pointer">
+                Randomize question order for each student
+              </Label>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Submit Buttons */}
+        <div className="flex justify-end gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => navigate("/teacher/assessments")}
+          >
+            Cancel
+          </Button>
+          <Button type="submit">
+            {isEditing ? "Update Assessment" : "Create Assessment"}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
