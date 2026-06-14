@@ -11,7 +11,7 @@ def test_add_module():
         "code": f"CODE{ts}",
         "description": "A test module description"
     }
-    
+
     try:
         response = requests.post(url, json=payload)
         print(f"Status Code: {response.status_code}")

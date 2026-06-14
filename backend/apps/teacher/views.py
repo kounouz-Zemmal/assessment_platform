@@ -2349,7 +2349,7 @@ def teacher_question_detail(request, question_id):
 @user_passes_test(is_teacher)
 @require_http_methods(["POST"])
 def teacher_ai_generate(request):
-    """Proxy to the Flask AI service (ai_mvp). Body: { question, options: { answer, keywords, improve } }."""
+    """Proxy to the Flask AI service (services/ai_mvp). Body: { question, options: { answer, keywords, improve } }."""
     url = getattr(settings, "AI_SERVICE_URL", "http://127.0.0.1:5000/api/ai/generate")
     req = urllib.request.Request(
         url,
@@ -2369,7 +2369,7 @@ def teacher_ai_generate(request):
     except urllib.error.URLError:
         return JsonResponse(
             {
-                "error": "AI service is not reachable. Start the Flask app in ai_mvp/ (python app.py) or set AI_SERVICE_URL.",
+                "error": "AI service is not reachable. Start the Flask app in services/ai_mvp/ (python app.py) or set AI_SERVICE_URL.",
                 "improved_question": "",
                 "answer": "",
                 "keywords": [],

@@ -3,9 +3,11 @@ node_modules/
 dist/
 build/
 coverage/
+frontend/dist/
 .env
 .env.local
 *.log
 venv/
 __pycache__/
 .DS_Store
+backend/db.sqlite3
